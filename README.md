@@ -33,6 +33,43 @@ Telegram Bot (aiogram 3.x)
 
 **Docker Compose stack:** App + PostgreSQL 17 + Qdrant + Redis 7 + Google Workspace MCP
 
+## Google Cloud Setup (Required for Gmail/Calendar/Drive)
+
+1. **Create Google Cloud Project**
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Select or create a project
+
+2. **Enable Required APIs**
+   ```
+   Gmail API
+   Google Calendar API
+   Google Drive API
+   Google Sheets API
+   Google Docs API
+   Google People API
+   ```
+
+3. **Configure OAuth 2.0**
+   - Go to **APIs & Services → Credentials**
+   - Create **OAuth 2.0 Client ID**
+   - Application type: **Web application**
+   - Name: `PersonalAsst`
+   - Authorized redirect URI: `http://localhost:8080/auth/callback`
+   - Download credentials as `credentials.json`
+
+4. **Update .env**
+   ```bash
+   cp .env.example .env
+   # Add to .env:
+   GOOGLE_OAUTH_CLIENT_ID=your_client_id
+   GOOGLE_OAUTH_CLIENT_SECRET=your_client_secret
+   ```
+
+5. **Place credentials file**
+   ```bash
+   mv ~/Downloads/credentials.json .
+   ```
+
 ## Quick Start
 
 ```bash
@@ -47,12 +84,18 @@ cp .env.example .env
 #   TELEGRAM_BOT_TOKEN   (from @BotFather on Telegram)
 #   OWNER_TELEGRAM_ID    (your numeric Telegram ID)
 #   DB_PASSWORD           (any random string)
+#   GOOGLE_OAUTH_CLIENT_ID    (from Google Cloud Console)
+#   GOOGLE_OAUTH_CLIENT_SECRET (from Google Cloud Console)
 
 # 3. Build & Start
 docker compose build
 docker compose up -d
 
-# 4. Chat
+# 4. Connect Google Workspace
+# In Telegram: /connect google
+# Follow OAuth link → approve → return to bot
+
+# 5. Chat
 # Open Telegram → send /start to your bot
 ```
 
