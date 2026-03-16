@@ -1,0 +1,29 @@
+{
+  "$schema": "tool-manifest-v1",
+  "name": "example_echo",
+  "version": "1.0.0",
+  "description": "Example tool: echo text with optional formatting",
+  "type": "cli",
+  "entrypoint": "cli.py",
+  "wrapper": "tool.py",
+  "parameters": {
+    "text": {
+      "type": "str",
+      "required": true,
+      "description": "Text to process"
+    },
+    "format": {
+      "type": "str",
+      "required": false,
+      "description": "Output format: json, text, or upper",
+      "default": "text"
+    }
+  },
+  "output_format": "text",
+  "timeout_seconds": 10,
+  "requires_approval": false,
+  "requires_network": false,
+  "allowed_hosts": [],
+  "created_at": "2026-03-16T12:00:00Z",
+  "created_by": "manual"
+}

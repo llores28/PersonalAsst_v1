@@ -1,0 +1,110 @@
+version: "3.9"
+
+services:
+  # ─── Core Application ───
+  assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: personal-assistant
+    restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OWNER_TELEGRAM_ID=${OWNER_TELEGRAM_ID}
+      - DATABASE_URL=postgresql+asyncpg://assistant:${DB_PASSWORD}@postgres:5432/assistant
+      - REDIS_URL=redis://redis:6379/0
+      - QDRANT_URL=http://qdrant:6333
+      - MODEL_ORCHESTRATOR=${MODEL_ORCHESTRATOR:-gpt-5.4-mine}
+      - MODEL_CODE_GEN=${MODEL_CODE_GEN:-gpt-5.3-codex}
+      - MODEL_FAST=${MODEL_FAST:-gpt-4.1-nano}
+      - MODEL_GENERAL=${MODEL_GENERAL:-gpt-5.4}
+      - DAILY_COST_CAP_USD=${DAILY_COST_CAP_USD:-5.00}
+      - MONTHLY_COST_CAP_USD=${MONTHLY_COST_CAP_USD:-100.00}
+      - DEFAULT_ASSISTANT_NAME=${DEFAULT_ASSISTANT_NAME:-Atlas}
+      - DEFAULT_PERSONA_STYLE=${DEFAULT_PERSONA_STYLE:-friendly}
+      - DEFAULT_TIMEZONE=${DEFAULT_TIMEZONE:-America/New_York}
+      - MAX_TOOL_CALLS_PER_REQUEST=${MAX_TOOL_CALLS_PER_REQUEST:-20}
+      - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-120}
+      - TOOL_SUBPROCESS_TIMEOUT=${TOOL_SUBPROCESS_TIMEOUT:-30}
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      - WORKSPACE_MCP_URL=http://workspace-mcp:8080/mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    volumes:
+      - tools_data:/app/tools
+      - config_data:/app/config
+      - backups_data:/app/backups
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: "2.0"
+
+  # ─── PostgreSQL (Memory, Jobs, Audit) ───
+  postgres:
+    image: postgres:17-alpine
+    container_name: assistant-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=assistant
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=assistant
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U assistant"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ─── Qdrant (Vector Embeddings) ───
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: assistant-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ─── Google Workspace MCP Server ───
+  workspace-mcp:
+    image: ghcr.io/taylorwilsdon/google_workspace_mcp:latest
+    container_name: workspace-mcp
+    restart: unless-stopped
+    environment:
+      - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
+      - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      - WORKSPACE_MCP_STATELESS_MODE=true
+      - OAUTHLIB_INSECURE_TRANSPORT=1
+    volumes:
+      - workspace_tokens:/data/tokens
+    ports:
+      - "127.0.0.1:8081:8080"
+
+  # ─── Redis (Cache, Sessions, Rate Limiting) ───
+  redis:
+    image: redis:7-alpine
+    container_name: assistant-redis
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  qdrant_data:
+  redis_data:
+  tools_data:
+  config_data:
+  workspace_tokens:
+  backups_data:

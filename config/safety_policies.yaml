@@ -1,0 +1,24 @@
+version: 1
+policies:
+  - name: no_bulk_delete
+    description: "Block bulk delete operations"
+    trigger: tool_call
+    match:
+      args_contain: ["delete_all", "rm -rf", "DROP"]
+    action: block
+    message: "Bulk delete operations are not allowed."
+
+  - name: pii_redaction
+    description: "Redact PII from logs"
+    trigger: output
+    match:
+      patterns: ["\\b\\d{3}-\\d{2}-\\d{4}\\b", "\\b\\d{16}\\b"]
+    action: redact
+
+  - name: rate_limit
+    description: "Max requests per minute"
+    trigger: input
+    match:
+      rate: 30/minute
+    action: throttle
+    message: "You're sending messages too quickly. Please wait a moment."

@@ -1,0 +1,5 @@
+google_workspace:
+  tier: core
+  # core: Gmail read/send, Calendar read/create, Drive search/download
+  # extended: + Docs edit, Sheets write, Contacts
+  # complete: + Slides, Forms, Chat, Apps Script
