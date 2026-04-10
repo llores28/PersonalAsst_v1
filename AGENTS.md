@@ -1,91 +1,71 @@
-# AGENTS.md — PersonalAsst Repository
+# Nexus - Intelligent Project Operating System
 
-## Repo Navigation
+Nexus creates a complete, AI-powered project operating system that automatically optimizes development workflows, agent behaviors, and model selection based on task complexity.
 
-| Path | Purpose |
-|------|---------|
-| `src/` | All application source code |
-| `src/bot/` | Telegram bot layer (aiogram 3.x) |
-| `src/agents/` | Agent definitions (OpenAI Agents SDK) |
-| `src/agents/orchestrator.py` | Main triage agent — routes to specialists |
-| `src/agents/email_agent.py` | Gmail specialist (as_tool) |
-| `src/agents/calendar_agent.py` | Google Calendar specialist (as_tool) |
-| `src/agents/drive_agent.py` | Google Drive specialist (as_tool) |
-| `src/agents/memory_agent.py` | Memory specialist — recall/store/forget (as_tool) |
-| `src/agents/reflector_agent.py` | Post-interaction quality scorer (ACE pattern) |
-| `src/agents/scheduler_agent.py` | Scheduling specialist — cron/interval/one-shot (as_tool) |
-| `src/agents/tool_factory_agent.py` | Tool Factory — generates CLI tools (Handoff) |
-| `src/agents/curator_agent.py` | Weekly self-improvement curator (ACE pattern step 3) |
-| `src/agents/safety_agent.py` | Input/output guardrails |
-| `src/integrations/workspace_mcp.py` | Google Workspace MCP client config |
-| `src/memory/mem0_client.py` | Mem0 wrapper (self-hosted Qdrant + PostgreSQL) |
-| `src/memory/conversation.py` | Redis session management (30-min TTL + archival) |
-| `src/memory/persona.py` | Persona CRUD with DB versioning + Mem0 preferences |
-| `src/tools/` | Tool registry, sandbox, manifest schema |
-| `src/memory/` | Mem0 wrapper, Redis sessions, persona CRUD |
-| `src/scheduler/` | APScheduler engine + job callables |
-| `src/integrations/` | Google Workspace MCP client |
-| `src/db/` | SQLAlchemy models + Alembic migrations |
-| `config/` | Runtime YAML: persona, safety policies, tool tiers |
-| `tools/` | Dynamic CLI tools (Docker volume, hot-reloaded) |
-| `tests/` | pytest test suite |
-| `PRD_PersonalAssistant.md` | **Build spec** — schemas, decisions, acceptance criteria |
-| `RESEARCH_PersonalAssistant.md` | Research context (read-only reference) |
+## Project Overview
 
-## Command Verification Policy
+This is `Nexus`, a reusable bootstrap toolkit that generates project-specific AI-powered operating systems including rules, agents, skills, workflows, and documentation.
 
-- **Never invent commands.** Only use commands documented in this file, `docs/DEVELOPER_GUIDE.md`, or verified from `docker-compose.yml` / `Makefile` / `pyproject.toml`.
-- Prefer read-only commands first (`docker compose ps`, `pytest --collect-only`).
-- Destructive commands require user approval.
+### Key directories
+- `nexus/` — Bootstrap prompt templates (Fast/Team/Enterprise) and model selection reference
+- `nexus/cli/` — Python CLI tools (smoketest, debug, research, scrape, local-env, scaffold)
+- `.windsurf/rules/` — Nexus rule files with activation triggers
+- `.windsurf/skills/` — Reusable skill definitions (SKILL.md + resources)
+- `.windsurf/workflows/` — Slash-command workflow definitions
 
-## Verified Commands
+### Stack
+- Python 3.10+ (CLI tools)
+- Click + Rich (CLI framework)
+- httpx + beautifulsoup4 (web scraping)
+- Markdown (all config/templates)
 
-```bash
-# Dev
-docker compose up -d              # Start all services
-docker compose down               # Stop all services
-docker compose build              # Rebuild images
-docker compose logs -f assistant  # Tail app logs
+## Operating Constraints
 
-# Database
-docker compose exec assistant alembic upgrade head    # Apply migrations
-docker compose exec assistant alembic downgrade -1    # Rollback last migration
+1. **No secrets** in output, commits, or logs.
+2. **No invented commands** — verify from repo files before suggesting.
+3. **Minimal changes** — prefer small, reversible edits.
+4. **Security defaults** — validate paths, validate URLs, no shell=True, no eval/exec.
+5. **Evidence-based** — cite file paths for non-trivial claims.
+6. Mark uncertainty as `TODO(verify)`.
 
-# Test
-pytest tests/ -v                  # Run all tests
-pytest tests/ --cov=src           # Run with coverage
+## Token/Quota Efficiency
 
-# Lint
-ruff check src/ tests/            # Lint
-ruff format src/ tests/           # Format
-mypy src/ --strict                # Type check
+- Use code search / Fast Context before reading full files.
+- Read files in large chunks to avoid repeated small reads.
+- Batch independent tool calls in parallel.
+- Keep responses concise — no restating known context.
+- For simple edits, suggest Ctrl+I (Command mode, free, no quota cost).
+- For routine tasks, use SWE-1.5 (free model) or SWE-1.
+- **Auto model selection**: Nexus automatically selects the optimal model based on task complexity via `nexus/model-selection-reference.md`.
+- Suggest user run tests manually rather than auto-executing.
+
+## Testing
+
+- Run `python nexus/cli/bs_cli.py smoketest --level quick` for quick verification.
+- Run `python nexus/cli/bs_cli.py prereqs` to check prerequisites.
+- CLI tools emit structured JSON by default (`--format json`), human output via `--format human`.
+
+## CLI Toolkit Commands
+
+```
+python nexus/cli/bs_cli.py prereqs          # Check prerequisites
+python nexus/cli/bs_cli.py smoketest         # Run smoke tests
+python nexus/cli/bs_cli.py debug logs <path> # Inspect logs
+python nexus/cli/bs_cli.py debug secrets-scan # Scan for leaked secrets
+python nexus/cli/bs_cli.py research docs <q> # Search docs
+python nexus/cli/bs_cli.py scrape page <url> # Scrape a page
+python nexus/cli/bs_cli.py local-env up      # Start containers
+python nexus/cli/bs_cli.py scaffold <name>   # Create new CLI tool
 ```
 
-## Safe Command Execution Policy
+## Model Selection
 
-- Read-only and test commands: safe to auto-run.
-- `docker compose up/down/build`: safe to run (local dev only).
-- `alembic upgrade`: requires confirmation (mutates DB schema).
-- `docker compose exec postgres ...`: requires confirmation (direct DB access).
-- File deletion, `pip install`, network requests: always require approval.
+Nexus includes intelligent model selection that automatically chooses the optimal AI model based on task complexity:
 
-## Testing Expectations
+- **Simple tasks** (typos, formatting): SWE-1.5 (Free)
+- **Moderate tasks** (multi-file edits): GPT-5 Low (0.5x)
+- **Complex tasks** (refactoring): GPT-5 Med / Gemini 3.1 Pro (1x)
+- **Expert tasks** (architecture): Claude Sonnet 4.6 / GPT-5 High (2x)
+- **Frontier tasks** (threat modeling): Claude Opus 4.6 (2-3x)
 
-- Every new agent, tool, or job callable gets at least one test.
-- Mock OpenAI API in tests — never hit real API.
-- Use `pytest-asyncio` for async test functions.
-- Run full suite before any commit.
-
-## Documentation Update Expectations
-
-- New agents → update this file's navigation table.
-- New Telegram commands → update `docs/USER_GUIDE.md`.
-- New config options → update `.env.example` and `docs/DEVELOPER_GUIDE.md`.
-- Schema changes → create Alembic migration.
-
-## Escalation Behavior
-
-- If uncertain about a destructive action → ask user.
-- If a tool call fails → log error, return user-friendly message, offer retry.
-- If security concern → flag it, do not proceed silently.
-- If a PRD decision seems wrong during implementation → note it, ask user before deviating.
+See `nexus/model-selection-reference.md` for the complete model database and selection algorithm.

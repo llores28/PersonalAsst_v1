@@ -1,0 +1,36 @@
+# Cursor Rules — Nexus
+
+## Project
+Nexus — Intelligent Project Operating System. Generates project-specific AI-powered operating systems (rules, agents, skills, workflows, docs) with automatic model selection and cross-IDE support.
+
+## Stack
+- Python 3.10+, Click, Rich, httpx, beautifulsoup4
+- Entry: `nexus/cli/bs_cli.py`
+- Templates: `nexus/{1Fast,2Team,3Enterprise}-ws-Bootstrap.md`
+
+## Constraints
+- No secrets in output/commits/logs
+- No invented commands — verify from repo files
+- No shell=True, eval(), exec()
+- Validate paths via `nexus/cli/security.py:validate_path()`
+- Validate URLs via `nexus/cli/security.py:validate_url()`
+- Structured output via `nexus/cli/utils.py:emit()`
+- Mark uncertainty as `TODO(verify)`
+- Prefer minimal, reversible edits
+- Keep responses concise
+
+## Commands
+```bash
+python nexus/cli/bs_cli.py prereqs           # Check prerequisites
+python nexus/cli/bs_cli.py smoketest --level quick  # Quick smoke test
+python nexus/cli/bs_cli.py debug secrets-scan # Scan for leaked secrets
+python nexus/cli/bs_cli.py research docs <q>  # Search docs
+python nexus/cli/bs_cli.py scaffold <name>    # Create new CLI tool
+python nexus/cli/bs_cli.py health check        # Nexus health check
+```
+
+## Key Directories
+- `nexus/` — Templates + CLI toolkit
+- `nexus/cli/tools/` — Individual CLI tool implementations
+- `.windsurf/` — Windsurf-specific rules, skills, workflows
+- `.github/` — GitHub Copilot instructions

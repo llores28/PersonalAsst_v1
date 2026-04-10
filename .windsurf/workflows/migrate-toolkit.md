@@ -37,6 +37,18 @@ Copy all 7 skill folders into `.windsurf/skills/` alongside existing skills.
 ## 6) Copy new workflows
 Copy all 8 workflow files into `.windsurf/workflows/` alongside existing workflows.
 
+## 6b) Add token efficiency + cross-IDE support
+Create these files if they don't already exist:
+- `.windsurf/rules/00-token-efficiency.md` (always_on, quota conservation rule)
+- `.codeiumignore` (exclude large/generated files from indexing)
+- `.github/copilot-instructions.md` (VS Code Copilot cross-IDE support)
+- `CLAUDE.md` (Claude Code cross-IDE support)
+- `.cursorrules` (Cursor IDE cross-IDE support)
+
+If `AGENTS.md` already exists, verify it contains project context usable by VS Code Copilot.
+
+Review existing `.windsurf/rules/` and suggest changing non-critical rules from `always_on` to `model_decision` trigger for quota savings.
+
 ## 7) Run prerequisites check
 // turbo
 ```
