@@ -1,7 +1,5 @@
 """Tests for Phase 3 memory system."""
 
-import pytest
-from unittest.mock import patch, MagicMock, AsyncMock
 
 from src.memory.persona import PERSONA_TEMPLATE
 
@@ -13,16 +11,22 @@ class TestPersonaTemplate:
         placeholders = [
             "{name}", "{user_name}", "{personality_traits}",
             "{communication_style}", "{user_preferences}",
-            "{procedural_memories}", "{recent_context}",
+            "{procedural_memories}", "{recent_context}", "{task_context}",
         ]
         for p in placeholders:
             assert p in PERSONA_TEMPLATE, f"Missing placeholder: {p}"
 
     def test_template_mentions_specialists(self) -> None:
-        assert "Email" in PERSONA_TEMPLATE
+        assert "Gmail" in PERSONA_TEMPLATE
         assert "Calendar" in PERSONA_TEMPLATE
         assert "Drive" in PERSONA_TEMPLATE
         assert "Memory" in PERSONA_TEMPLATE
+        assert "Tasks" in PERSONA_TEMPLATE
+        assert "Docs" in PERSONA_TEMPLATE
+        assert "Sheets" in PERSONA_TEMPLATE
+        assert "Slides" in PERSONA_TEMPLATE
+        assert "Contacts" in PERSONA_TEMPLATE
+        assert "Scheduler" in PERSONA_TEMPLATE
 
     def test_template_mentions_connect(self) -> None:
         assert "/connect google" in PERSONA_TEMPLATE
@@ -36,10 +40,13 @@ class TestPersonaTemplate:
             user_preferences="prefers mornings",
             procedural_memories="none yet",
             recent_context="new conversation",
+            task_context="current request",
+            deep_profile="",
         )
         assert "Atlas" in result
         assert "TestUser" in result
         assert "prefers mornings" in result
+        assert "current request" in result
 
 
 class TestConversation:
@@ -94,6 +101,9 @@ class TestOrchestratorPhase3:
         prompt = build_persona_prompt("TestUser")
         assert "TestUser" in prompt
         assert "Still learning" in prompt
+        assert "## Current Task" in prompt
+        assert "## Memory Strata" in prompt
+        assert "internal_write" in prompt
 
     def test_create_orchestrator_sync_fallback(self) -> None:
         from src.agents.orchestrator import create_orchestrator

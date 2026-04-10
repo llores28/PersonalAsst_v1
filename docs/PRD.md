@@ -2,8 +2,8 @@
 
 ## 0) Metadata
 
-- PRD version: 1.0
-- Date: March 16, 2026
+- PRD version: 1.1
+- Date: March 21, 2026 (updated)
 - Owner: Repository owner (single-user project)
 - Selected bootstrap tier: Team (Balanced)
 - Wizard confidence: High
@@ -78,6 +78,15 @@
 - Voice message transcription (Phase 6)
 - Self-improvement loop / ACE pattern (Phase 3 partial, Phase 6 full)
 
+### Phase 7 — Persona Interview Onboarding (NEW)
+
+- Structured conversational interview via Telegram (3 sessions)
+- LLM-powered personality synthesis (Big Five / OCEAN scoring)
+- Deep persona profile schema (communication, work context, values)
+- Interview progress tracking with resume capability
+- Curator-driven periodic persona re-synthesis from accumulated memories
+- Research basis: Stanford "Generative Agent Simulations" (2024), Cambridge/DeepMind Psychometric Framework (2025)
+
 ## 6) Functional Requirements
 
 | ID | Requirement | Priority | Rationale | Acceptance Criteria |
@@ -97,6 +106,11 @@
 | FR-013 | Tool Factory creates CLI tools on demand | P2 | Extensibility | User requests tool → generated, tested, registered in <2 min |
 | FR-014 | Web search via OpenAI WebSearchTool | P1 | Information | "Search for X" returns relevant web results |
 | FR-015 | `/help` command with capability list | P0 | UX | Returns formatted list of all available commands |
+| FR-016 | Persona Interview Onboarding — structured conversational interview to build deep user personality profile | P1 | Intelligence | `/persona interview` launches 3-session interview; transcript synthesized into OCEAN + communication profile |
+| FR-017 | OCEAN personality scoring — Big Five trait extraction from interview transcripts | P1 | Intelligence | LLM synthesis produces scores for Openness, Conscientiousness, Extraversion, Agreeableness, Neuroticism |
+| FR-018 | Deep persona profile — expanded personality schema with communication style, work context, values | P1 | Customization | PersonaVersion.personality JSONB stores OCEAN, communication, work_context, values, synthesis fields |
+| FR-019 | Persona interview progress tracking — multi-session interview state persisted across conversations | P1 | UX | Interview state stored in DB; user can resume interrupted sessions |
+| FR-020 | Curator-driven persona re-synthesis — periodic update of persona profile from accumulated Mem0 memories | P2 | Intelligence | Curator weekly cycle includes persona profile refresh from recent memories |
 
 ## 7) Non-Functional Requirements (NFR)
 
@@ -202,12 +216,15 @@ See `PRD_PersonalAssistant.md` §3 for all 6 architectural decisions (AD-1 throu
 | AD-4: Filesystem watcher for tool hot-reload | watchdog on `tools/` directory | Decided |
 | AD-5: Tell user on error, no silent retry | User stays in control | Decided |
 | AD-6: Sequential per-user message queue | asyncio.Queue per user_id | Decided |
+| AD-7: Interview-based persona onboarding | Structured 3-session conversational interview for deep personality profiling (Stanford approach) | Decided |
 
 **Potential future ADR triggers:**
 - If response latency exceeds 10s consistently → consider multi-process separation
 - If tool count exceeds 50 → consider MCP-based discovery over filesystem scan
 - If user requests multi-user → requires full tenancy redesign
+- If persona interview transcripts exceed context window → consider chunked synthesis or RAG approach
 
 ## 15) Open Questions
 
 1. ~~All 23 gaps from research resolved in PRD~~ — None remaining.
+2. **Persona Interview Onboarding** — How many interview sessions are optimal? Stanford research suggests 2 hours total. Current design uses 3 sessions of 5–10 minutes each. Adjust based on user feedback.

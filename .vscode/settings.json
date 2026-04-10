@@ -1,0 +1,9 @@
+{
+  "chat.agentSkillsLocations": [
+    ".windsurf/skills"
+  ],
+  "chat.promptFilesLocations": [
+    ".github/prompts"
+  ],
+  "chatgpt.openOnStartup": true
+}

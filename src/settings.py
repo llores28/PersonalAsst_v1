@@ -15,11 +15,17 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://redis:6379/0", description="Redis connection URL")
     qdrant_url: str = Field(default="http://qdrant:6333", description="Qdrant connection URL")
 
-    # ── Models ──
-    model_orchestrator: str = Field(default="gpt-5.4-mine")
-    model_code_gen: str = Field(default="gpt-5.3-codex")
-    model_fast: str = Field(default="gpt-4.1-nano")
-    model_general: str = Field(default="gpt-5.4")
+    # ── Models (role-based, GPT-5.4 family defaults) ──
+    model_orchestrator: str = Field(default="gpt-5.4")
+    model_code_gen: str = Field(default="gpt-5.4-mini")  # deprecated alias for model_coding
+    model_coding: str = Field(default="gpt-5.4-mini")
+    model_fast: str = Field(default="gpt-5.4-nano")
+    model_general: str = Field(default="gpt-5.4-mini")
+    model_safety: str = Field(default="gpt-5.4-nano")
+    model_reflector: str = Field(default="gpt-5.4-nano")
+    model_repair: str = Field(default="gpt-5.4-mini")
+    model_routing: str = Field(default="gpt-5.4-nano")
+    default_reasoning_effort: str = Field(default="medium")
 
     # ── Cost Control ──
     daily_cost_cap_usd: float = Field(default=5.00)
@@ -40,12 +46,12 @@ class Settings(BaseSettings):
     # ── Google Workspace (optional, Phase 2+) ──
     google_oauth_client_id: str = Field(default="")
     google_oauth_client_secret: str = Field(default="")
-    workspace_mcp_url: str = Field(default="http://workspace-mcp:8080/mcp")
+    workspace_mcp_url: str = Field(default="http://workspace-mcp:8000/mcp")
 
     # ── Web Search (optional) ──
     tavily_api_key: str = Field(default="")
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()

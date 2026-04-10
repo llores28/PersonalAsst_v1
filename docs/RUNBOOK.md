@@ -34,6 +34,14 @@ docker compose logs -f assistant
 docker compose logs --tail=50 assistant
 ```
 
+### Rebuild Assistant After Source Changes
+```bash
+docker compose build assistant
+docker compose up -d assistant
+```
+
+The assistant container copies `src/`, `tests/`, and config files into the image at build time. Only `src/tools/plugins/` is bind-mounted live, so Python code changes in agents, routing, and handlers do not reach Telegram until you rebuild or restart the assistant container with a fresh image.
+
 ### Apply Database Migrations
 ```bash
 docker compose exec assistant alembic upgrade head
@@ -83,6 +91,51 @@ cat backup_20260316.sql | docker compose exec -T postgres psql -U assistant assi
 1. Check Qdrant: `docker compose logs --tail=20 qdrant`
 2. Restart: `docker compose restart qdrant`
 3. Qdrant data persists in `qdrant_data` Docker volume
+
+### Stale SDK Sessions / "Something Went Wrong"
+
+If the bot gives generic errors or "No tool call found" 400 errors:
+
+1. Check logs: `docker compose logs --tail=50 assistant | findstr "BadRequestError\|No tool call found"`
+2. Clear stale SDK sessions:
+   ```bash
+   docker compose exec assistant python -c "
+   import asyncio, redis.asyncio as aioredis
+   async def clear():
+       r = aioredis.from_url('redis://assistant-redis:6379/0', decode_responses=True)
+       keys = await r.keys('agent_session:*')
+       if keys:
+           await r.delete(*keys)
+           print(f'Cleared {len(keys)} stale session keys')
+       else:
+           print('No stale session keys')
+       await r.aclose()
+   asyncio.run(clear())
+   "
+   ```
+3. The bot auto-recovers from stale sessions (catch + clear + retry), but manual clearing helps if sessions are badly corrupted.
+
+### Scheduler / Reminder Issues
+
+1. Check scheduler started: `docker compose logs assistant | findstr "Scheduler started"`
+2. Check for job errors: `docker compose logs assistant | findstr "Failed to create reminder\|scheduler"`
+3. List active APScheduler jobs:
+   ```bash
+   docker compose exec assistant python -c "
+   import asyncio
+   from src.scheduler.engine import start_scheduler, get_all_jobs, stop_scheduler
+   async def check():
+       await start_scheduler()
+       jobs = await get_all_jobs()
+       for j in jobs: print(j)
+       await stop_scheduler()
+   asyncio.run(check())
+   "
+   ```
+4. Common issues:
+   - **`DateTrigger` errors** → ensure `run_time=` parameter (not `run_date=`, APScheduler 4.x API)
+   - **`FunctionTool object is not callable`** → bound tools must call `_*_impl` functions, not `@function_tool` objects
+   - **Naive datetime rejected** → engine auto-attaches default timezone, but verify `DEFAULT_TIMEZONE` in `.env`
 
 ## Monitoring Queries
 

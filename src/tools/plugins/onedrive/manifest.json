@@ -1,0 +1,50 @@
+{
+  "$schema": "tool-manifest-v1",
+  "name": "onedrive",
+  "version": "1.0.0",
+  "description": "OneDrive via Microsoft Graph — search files, inspect folders, create folders, rename items, and move files or folders.",
+  "type": "function",
+  "entrypoint": "tool.py",
+  "wrapper": "tool.py",
+  "parameters": {},
+  "output_format": "json",
+  "timeout_seconds": 60,
+  "requires_approval": false,
+  "requires_network": true,
+  "allowed_hosts": [
+    "graph.microsoft.com",
+    "login.microsoftonline.com"
+  ],
+  "credentials": {
+    "onedrive_access_token": {
+      "description": "Microsoft Graph access token for the signed-in OneDrive user",
+      "required": false,
+      "env_var_hint": "ONEDRIVE_ACCESS_TOKEN"
+    },
+    "onedrive_refresh_token": {
+      "description": "Microsoft OAuth refresh token for delegated OneDrive access",
+      "required": false,
+      "env_var_hint": "ONEDRIVE_REFRESH_TOKEN"
+    },
+    "microsoft_client_id": {
+      "description": "Microsoft Entra application client ID used to refresh Graph tokens",
+      "required": false,
+      "env_var_hint": "MICROSOFT_CLIENT_ID"
+    },
+    "microsoft_client_secret": {
+      "description": "Microsoft Entra client secret for confidential clients",
+      "required": false,
+      "env_var_hint": "MICROSOFT_CLIENT_SECRET"
+    },
+    "microsoft_tenant_id": {
+      "description": "Microsoft tenant identifier or 'common' for multi-tenant auth",
+      "required": false,
+      "env_var_hint": "MICROSOFT_TENANT_ID"
+    }
+  },
+  "dependencies": [
+    "httpx>=0.28.0"
+  ],
+  "created_at": "2026-03-22T00:00:00Z",
+  "created_by": "manual"
+}

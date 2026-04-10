@@ -115,8 +115,8 @@ On expire → Mem0 summarizes → PostgreSQL episodic_memories table
 
 ### AD-4: Tool Hot-Reload via Filesystem Watch
 
-**Decision:** The orchestrator watches `tools/` directory for changes. When a new `manifest.json` appears, it loads the tool's `function_tool` wrapper and adds it to the agent's tool list.  
-**Implementation:** `watchdog` library on the `tools/` Docker volume. On change → validate manifest → import wrapper → update orchestrator's tool registry.
+**Decision:** The orchestrator watches `src/tools/plugins/` directory for changes. When a new `manifest.json` appears, it loads the tool's `function_tool` wrapper and adds it to the agent's tool list.  
+**Implementation:** `watchdog` library on the `src/tools/plugins/` Docker volume. On change → validate manifest → import wrapper → update orchestrator's tool registry.
 
 ### AD-5: Error Propagation — Tell User, Don't Retry Silently
 
@@ -200,10 +200,10 @@ PersonalAsst/
 │   ├── safety_policies.yaml        # Declarative safety rules (resolves C5)
 │   └── tool_tiers.yaml             # Google Workspace tool tier config
 │
-├── tools/                          # Dynamic tool storage (Docker volume)
-│   └── _example/
-│       ├── cli.py                  # Example CLI tool
-│       ├── tool.py                 # function_tool wrapper
+│   ├── plugins/                    # Dynamic tool plugins (bind-mounted volume)
+│   │   └── _example/
+│   │       ├── cli.py              # Example CLI tool
+│   │       ├── tool.py             # function_tool wrapper
 │       └── manifest.json           # Tool manifest
 │
 └── tests/
@@ -596,7 +596,7 @@ async def load_persona_prompt(user_id: int, phase: int = 1) -> str:
 ```python
 # src/tools/registry.py
 class ToolRegistry:
-    """Discovers tools from tools/ directory, hot-reloads on changes."""
+    """Discovers tools from src/tools/plugins/ directory, hot-reloads on changes."""
     
     def __init__(self, tools_dir: Path):
         self.tools_dir = tools_dir
@@ -604,7 +604,7 @@ class ToolRegistry:
         self._observer = None
     
     async def load_all(self) -> list[FunctionTool]:
-        """Scan tools/ for manifest.json files, load all valid tools."""
+        """Scan plugins dir for manifest.json files, load all valid tools."""
         for manifest_path in self.tools_dir.glob("*/manifest.json"):
             await self._load_tool(manifest_path)
         return list(self._tools.values())
@@ -918,7 +918,7 @@ SANDBOX_CONFIG = {
     "timeout": 30,                    # seconds
     "max_memory": "256M",             # via resource.setrlimit
     "network": True,                  # allowed (needed for API tools)
-    "allowed_paths": ["/app/tools/"], # chroot-like restriction via validation
+    "allowed_paths": ["/app/src/tools/plugins/"], # chroot-like restriction via validation
     "uid": 65534,                     # nobody user
     "env_whitelist": [],              # no inherited env vars (no API keys)
 }

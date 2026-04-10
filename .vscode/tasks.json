@@ -1,0 +1,113 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Quality: Ruff Check",
+      "type": "process",
+      "command": "ruff",
+      "args": [
+        "check",
+        "src/",
+        "tests/"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Quality: Ruff Format Check",
+      "type": "process",
+      "command": "ruff",
+      "args": [
+        "format",
+        "--check",
+        "src/",
+        "tests/"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Typecheck: Mypy Strict",
+      "type": "process",
+      "command": "mypy",
+      "args": [
+        "src/",
+        "--strict"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Tests: Collect Only",
+      "type": "process",
+      "command": "python",
+      "args": [
+        "-m",
+        "pytest",
+        "tests/",
+        "--collect-only"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Tests: Full Suite",
+      "type": "process",
+      "command": "python",
+      "args": [
+        "-m",
+        "pytest",
+        "tests/",
+        "-v"
+      ],
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Up",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "up",
+        "-d"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Build",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "build"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Down",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "down"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Docker: Logs Assistant",
+      "type": "process",
+      "command": "docker",
+      "args": [
+        "compose",
+        "logs",
+        "-f",
+        "assistant"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,3 +1,6 @@
+---
+trigger: always_on
+---
 # Project Overview — PersonalAsst
 
 ## What This Is

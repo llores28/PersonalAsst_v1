@@ -1,7 +1,7 @@
 """
-Bootstrap CLI Toolkit — main entry point.
+Nexus CLI Toolkit — main entry point.
 
-Usage: python bootstrap/cli/bs_cli.py <subcommand> [options]
+Usage: python nexus/cli/bs_cli.py <subcommand> [options]
 
 All tools emit structured JSON by default (--format json).
 Use --format human for rich terminal output.
@@ -51,7 +51,7 @@ class AuditGroup(click.Group):
 @click.group(cls=AuditGroup)
 @click.version_option(version="0.1.0", prog_name="bs-cli")
 def cli():
-    """Bootstrap CLI Toolkit — sniper-agent tools for Cascade."""
+    """Nexus CLI Toolkit — sniper-agent tools for Cascade."""
     pass
 
 
@@ -134,6 +134,29 @@ def local_env_cmd(ctx, subcommand, output_format, project_dir):
     """Local environment and container validation tools."""
     from bootstrap.cli.tools.local_env import run_local_env
     run_local_env(subcommand=subcommand, output_format=output_format, project_dir=project_dir)
+
+
+@cli.command("health")
+@click.argument("subcommand", type=click.Choice(["check", "components", "security", "usage", "report"]))
+@click.option("--format", "output_format", type=click.Choice(["json", "human", "yaml"]), default="json")
+@click.option("--project-dir", default=".", help="Project directory.")
+@click.pass_context
+def health_cmd(ctx, subcommand, output_format, project_dir):
+    """Nexus health check — validate components work cohesively."""
+    from bootstrap.cli.tools.health import run_health
+    run_health(subcommand=subcommand, output_format=output_format, project_dir=project_dir)
+
+
+@cli.command("supply-chain")
+@click.argument("subcommand", type=click.Choice(["scan", "ioc", "audit", "advisories"]))
+@click.argument("args", nargs=-1)
+@click.option("--format", "output_format", type=click.Choice(["json", "human", "yaml"]), default="json")
+@click.option("--project-dir", default=".", help="Project directory to scan.")
+@click.pass_context
+def supply_chain_cmd(ctx, subcommand, args, output_format, project_dir):
+    """Supply chain security scanner — detect compromised packages and IOCs."""
+    from bootstrap.cli.tools.supply_chain import run_supply_chain
+    run_supply_chain(subcommand=subcommand, args=args, output_format=output_format, project_dir=project_dir)
 
 
 if __name__ == "__main__":

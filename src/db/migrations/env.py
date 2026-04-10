@@ -1,8 +1,14 @@
 """Alembic environment configuration."""
 
+import sys
+from pathlib import Path
+from sqlalchemy import create_engine, pool
+from sqlalchemy.engine import make_url
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config, pool
 from alembic import context
 
 from src.db.models import Base
@@ -15,9 +21,19 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
+def _get_sync_database_url() -> str:
+    import os
+
+    raw_url = os.environ.get("DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    parsed_url = make_url(raw_url)
+    if parsed_url.drivername == "postgresql+asyncpg":
+        parsed_url = parsed_url.set(drivername="postgresql+psycopg2")
+    return parsed_url.render_as_string(hide_password=False)
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode."""
-    url = config.get_main_option("sqlalchemy.url")
+    url = _get_sync_database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -31,18 +47,8 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode."""
-    import os
-
-    configuration = config.get_section(config.config_ini_section)
-    db_password = os.environ.get("DB_PASSWORD", "")
-    url = config.get_main_option("sqlalchemy.url")
-    if url and "%(DB_PASSWORD)s" in url:
-        url = url.replace("%(DB_PASSWORD)s", db_password)
-        configuration["sqlalchemy.url"] = url
-
-    connectable = engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        _get_sync_database_url(),
         poolclass=pool.NullPool,
     )
 

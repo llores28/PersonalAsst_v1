@@ -1,3 +1,6 @@
+---
+trigger: always_on
+---
 # Release & Ops
 
 ## Deployment Model

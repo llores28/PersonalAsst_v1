@@ -9,6 +9,8 @@ from src.settings import settings
 
 logger = logging.getLogger(__name__)
 
+DEDUP_THRESHOLD = 0.85  # Cosine similarity threshold for memory deduplication
+
 _memory_instance: Optional[Memory] = None
 
 
@@ -55,9 +57,34 @@ def get_memory() -> Memory:
 
 
 async def add_memory(text: str, user_id: str, metadata: Optional[dict] = None) -> dict:
-    """Add a memory for a user."""
+    """Add a memory for a user, with dedup check.
+
+    Before storing, searches for semantically similar memories.  If a
+    near-duplicate is found (score >= ``DEDUP_THRESHOLD``), the existing
+    memory is updated instead of creating a new entry.
+    """
     mem = get_memory()
-    result = mem.add(text, user_id=user_id, metadata=metadata or {})
+    meta = metadata or {}
+
+    # Dedup: check for near-duplicate before inserting
+    try:
+        existing = mem.search(text, user_id=user_id, limit=3)
+        hits = existing.get("results", []) if isinstance(existing, dict) else existing
+        for hit in hits:
+            score = hit.get("score", 0)
+            if score >= DEDUP_THRESHOLD:
+                hit_id = hit.get("id")
+                if hit_id:
+                    mem.update(hit_id, text)
+                    logger.info(
+                        "Memory deduped (score=%.2f) for user %s — updated %s",
+                        score, user_id, hit_id,
+                    )
+                    return {"deduplicated": True, "id": hit_id, "score": score}
+    except Exception as exc:
+        logger.debug("Dedup search failed, storing fresh: %s", exc)
+
+    result = mem.add(text, user_id=user_id, metadata=meta)
     logger.debug("Memory added for user %s: %s", user_id, text[:80])
     return result
 
@@ -66,7 +93,19 @@ async def search_memories(query: str, user_id: str, limit: int = 10) -> list[dic
     """Search memories for a user by semantic similarity."""
     mem = get_memory()
     results = mem.search(query, user_id=user_id, limit=limit)
-    return results.get("results", []) if isinstance(results, dict) else results
+    hits = results.get("results", []) if isinstance(results, dict) else results
+
+    # Track access count on each returned memory
+    for hit in hits:
+        hit_id = hit.get("id")
+        if hit_id:
+            try:
+                current_meta = hit.get("metadata") or {}
+                current_meta["access_count"] = current_meta.get("access_count", 0) + 1
+                mem.update(hit_id, metadata=current_meta)
+            except Exception:
+                pass  # non-critical — don't break search for tracking
+    return hits
 
 
 async def get_all_memories(user_id: str) -> list[dict]:

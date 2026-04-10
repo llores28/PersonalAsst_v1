@@ -1,0 +1,1149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PersonalAsst — Architecture & Workflow Report</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #161b22;
+    --surface2: #1c2333;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --accent3: #d2a8ff;
+    --accent4: #f78166;
+    --accent5: #ffa657;
+    --accent6: #79c0ff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  .container { max-width: 1600px; margin: 0 auto; padding: 0 32px; }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #161b22 50%, #1a1e2e 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 60px 0 48px;
+    text-align: center;
+  }
+  .hero h1 { font-size: 2.8rem; font-weight: 700; margin-bottom: 12px; }
+  .hero h1 span { color: var(--accent); }
+  .hero p { font-size: 1.15rem; color: var(--text-muted); max-width: 700px; margin: 0 auto 28px; }
+  .hero-stats {
+    display: flex; justify-content: center; gap: 40px; flex-wrap: wrap;
+  }
+  .hero-stat {
+    text-align: center;
+  }
+  .hero-stat .num { font-size: 2.2rem; font-weight: 700; color: var(--accent); }
+  .hero-stat .label { font-size: 0.85rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* Navigation */
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 24px 32px;
+    margin: 32px auto;
+    max-width: 800px;
+  }
+  .toc h3 { color: var(--accent); margin-bottom: 12px; font-size: 1rem; text-transform: uppercase; letter-spacing: 1px; }
+  .toc-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px;
+  }
+  .toc a {
+    color: var(--text); text-decoration: none; padding: 6px 12px; border-radius: 6px;
+    display: block; font-size: 0.9rem; transition: background 0.15s;
+  }
+  .toc a:hover { background: var(--surface2); color: var(--accent); }
+  .toc a .num { color: var(--accent); margin-right: 6px; font-weight: 600; }
+
+  /* Sections */
+  section {
+    margin: 48px 0; padding: 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  section h2 {
+    font-size: 1.6rem; margin-bottom: 8px;
+    padding-bottom: 12px; border-bottom: 1px solid var(--border);
+  }
+  section h2 .section-num { color: var(--accent); margin-right: 8px; }
+  section .subtitle { color: var(--text-muted); margin-bottom: 24px; font-size: 0.95rem; }
+  section h3 { font-size: 1.15rem; color: var(--accent3); margin: 24px 0 12px; }
+
+  /* Mermaid */
+  .mermaid-wrap {
+    background: var(--surface2); border-radius: 8px; padding: 32px 24px;
+    margin: 20px 0; overflow-x: auto; text-align: center;
+  }
+  .mermaid { display: inline-block; min-width: 100%; }
+  .mermaid svg { min-height: 400px; width: 100%; max-width: 100%; height: auto; }
+  .mermaid-wrap.mermaid-xl svg { min-height: 600px; }
+  .mermaid-wrap.mermaid-seq svg { min-height: 700px; }
+
+  /* Charts */
+  .chart-row {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin: 20px 0;
+  }
+  .chart-row.chart-row-full { grid-template-columns: 1fr; }
+  .chart-box {
+    background: var(--surface2); border-radius: 8px; padding: 28px;
+  }
+  .chart-box h4 { color: var(--text-muted); font-size: 0.95rem; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 16px; text-align: center; }
+  .chart-box canvas { width: 100% !important; height: auto !important; min-height: 340px; }
+
+  /* Cards */
+  .card-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px;
+    margin: 16px 0;
+  }
+  .card {
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; transition: border-color 0.15s;
+  }
+  .card:hover { border-color: var(--accent); }
+  .card .card-icon { font-size: 1.6rem; margin-bottom: 8px; }
+  .card .card-title { font-weight: 600; margin-bottom: 4px; }
+  .card .card-desc { font-size: 0.92rem; color: var(--text-muted); line-height: 1.5; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 1rem; }
+  th, td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--accent); font-weight: 600; font-size: 0.9rem; text-transform: uppercase; letter-spacing: 0.5px; }
+  tr:hover td { background: var(--surface2); }
+
+  /* Pills */
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 0.75rem; font-weight: 600;
+  }
+  .pill-green { background: #1a3a2a; color: #3fb950; }
+  .pill-blue { background: #172336; color: #58a6ff; }
+  .pill-purple { background: #261d36; color: #d2a8ff; }
+  .pill-orange { background: #2d1f11; color: #ffa657; }
+  .pill-red { background: #3d1418; color: #f78166; }
+
+  /* Timeline */
+  .timeline { position: relative; padding-left: 28px; margin: 20px 0; }
+  .timeline::before {
+    content: ''; position: absolute; left: 8px; top: 0; bottom: 0;
+    width: 2px; background: var(--border);
+  }
+  .timeline-item { position: relative; margin-bottom: 20px; }
+  .timeline-item::before {
+    content: ''; position: absolute; left: -24px; top: 6px;
+    width: 12px; height: 12px; border-radius: 50%;
+    background: var(--accent); border: 2px solid var(--bg);
+  }
+  .timeline-item .date { font-size: 0.9rem; color: var(--accent); font-weight: 600; }
+  .timeline-item .title { font-weight: 600; margin: 2px 0; font-size: 1.05rem; }
+  .timeline-item .desc { font-size: 0.95rem; color: var(--text-muted); }
+
+  /* Flow description */
+  .flow-steps {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    margin: 16px 0; padding: 16px; background: var(--surface2); border-radius: 8px;
+  }
+  .flow-step {
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 18px; font-size: 1rem; font-weight: 500;
+  }
+  .flow-arrow { color: var(--accent); font-size: 1.4rem; font-weight: 700; }
+
+  /* Footer */
+  footer {
+    text-align: center; padding: 40px 0; color: var(--text-muted); font-size: 0.85rem;
+    border-top: 1px solid var(--border); margin-top: 48px;
+  }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .chart-row { grid-template-columns: 1fr; }
+    .hero h1 { font-size: 2rem; }
+    .hero-stats { gap: 24px; }
+    section { padding: 20px; }
+    .mermaid svg { min-height: 300px; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ========== HERO ========== -->
+<header class="hero">
+  <div class="container">
+    <h1><span>PersonalAsst</span> — Architecture Report</h1>
+    <p>A self-improving, multi-agent Personal Assistant that runs in Docker, talks through Telegram, manages Google Workspace, creates its own tools, and gets smarter over time.</p>
+    <div class="hero-stats">
+      <div class="hero-stat"><div class="num">15</div><div class="label">Agents</div></div>
+      <div class="hero-stat"><div class="num">75</div><div class="label">Tools</div></div>
+      <div class="hero-stat"><div class="num">12</div><div class="label">Skills</div></div>
+      <div class="hero-stat"><div class="num">5</div><div class="label">Docker Services</div></div>
+      <div class="hero-stat"><div class="num">630</div><div class="label">Tests Passing</div></div>
+      <div class="hero-stat"><div class="num">11</div><div class="label">ADRs</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ========== TABLE OF CONTENTS ========== -->
+<div class="container">
+  <div class="toc">
+    <h3>Contents</h3>
+    <div class="toc-grid">
+      <a href="#high-level"><span class="num">1</span> High-Level Architecture</a>
+      <a href="#message-flow"><span class="num">2</span> Message Lifecycle</a>
+      <a href="#agent-ecosystem"><span class="num">3</span> Agent Ecosystem</a>
+      <a href="#workspace"><span class="num">4</span> Google Workspace Skills</a>
+      <a href="#memory"><span class="num">5</span> Memory Architecture</a>
+      <a href="#scheduler"><span class="num">6</span> Scheduler Workflow</a>
+      <a href="#safety"><span class="num">7</span> Safety & Guardrails</a>
+      <a href="#infra"><span class="num">8</span> Docker Infrastructure</a>
+      <a href="#decisions"><span class="num">9</span> Key Design Decisions</a>
+      <a href="#bugs"><span class="num">10</span> Bug Fix Timeline</a>
+      <a href="#stats"><span class="num">11</span> Project Statistics</a>
+    </div>
+  </div>
+
+<!-- ========== 1. HIGH-LEVEL ARCHITECTURE ========== -->
+<section id="high-level">
+  <h2><span class="section-num">1.</span> High-Level Architecture</h2>
+  <p class="subtitle">How all the pieces fit together — from Telegram message to tool execution and response.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph TB
+  subgraph External["External Services"]
+    TG["🤖 Telegram Bot API"]
+    OAI["🧠 OpenAI API<br/>(GPT-5.x)"]
+    GAPI["☁️ Google Workspace APIs<br/>(Gmail, Calendar, Drive, etc.)"]
+  end
+
+  subgraph Docker["Docker Compose Stack"]
+    subgraph App["Python Application (single async process)"]
+      BOT["📱 Telegram Bot<br/>(aiogram 3.x)"]
+      ORCH["🎯 Orchestrator<br/>(Office Organizer)"]
+      SKILLS["⚡ Skill Registry<br/>(12 skills, 75 tools)"]
+      SAFETY["🛡️ Safety Agent<br/>(input + output guardrails)"]
+      SCHED["⏰ Scheduler<br/>(APScheduler 4.x)"]
+    end
+
+    subgraph Data["Data Layer"]
+      PG["🐘 PostgreSQL 17<br/>(users, tasks, audit, jobs)"]
+      QD["🔍 Qdrant<br/>(vector memory)"]
+      RD["⚡ Redis 7<br/>(sessions, cache)"]
+    end
+
+    MCP["🔌 Workspace MCP<br/>(Google OAuth)"]
+  end
+
+  TG <-->|"Messages"| BOT
+  BOT -->|"Route"| ORCH
+  ORCH -->|"LLM calls"| OAI
+  ORCH -->|"Execute tools"| SKILLS
+  ORCH <-->|"Guardrails"| SAFETY
+  SKILLS -->|"Google tools"| MCP
+  MCP <-->|"OAuth + API"| GAPI
+  SCHED -->|"Job store"| PG
+  ORCH <-->|"Memory"| QD
+  ORCH <-->|"Sessions"| RD
+  ORCH <-->|"DB queries"| PG
+
+  style External fill:#1a1e2e,stroke:#30363d,color:#e6edf3
+  style Docker fill:#0d1117,stroke:#30363d,color:#e6edf3
+  style App fill:#161b22,stroke:#58a6ff,color:#e6edf3
+  style Data fill:#161b22,stroke:#3fb950,color:#e6edf3
+    </pre>
+  </div>
+
+  <div class="flow-steps">
+    <div class="flow-step">📱 User sends Telegram message</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">🔐 Auth check (allowlist)</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">📥 Per-user queue (AD-6)</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">🛡️ Input guardrail</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">🎯 Orchestrator (LLM)</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">⚡ Tool execution</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">🛡️ Output guardrail (PII)</div>
+    <span class="flow-arrow">→</span>
+    <div class="flow-step">📤 Response to user</div>
+  </div>
+</section>
+
+<!-- ========== 2. MESSAGE LIFECYCLE ========== -->
+<section id="message-flow">
+  <h2><span class="section-num">2.</span> Message Lifecycle — Request Flow</h2>
+  <p class="subtitle">Detailed sequence of what happens when a user sends a message.</p>
+
+  <div class="mermaid-wrap mermaid-seq">
+    <pre class="mermaid">
+sequenceDiagram
+    actor User
+    participant TG as Telegram Bot
+    participant Queue as User Queue
+    participant Guard as Safety Agent
+    participant Orch as Orchestrator
+    participant LLM as OpenAI API
+    participant Session as Redis Session
+    participant Tools as Skill Tools
+    participant MCP as Workspace MCP
+    participant Mem as Memory (Mem0)
+
+    User->>TG: Send message
+    TG->>TG: Auth check (allowlist)
+    TG->>Queue: Enqueue (per-user sequential)
+    Queue->>Guard: Input guardrail check
+    Guard->>LLM: Injection detection (fast model)
+    LLM-->>Guard: safe / blocked
+    alt Input blocked
+        Guard-->>User: ⚠️ Blocked message
+    end
+    Guard->>Orch: Prepare input
+    Orch->>Orch: Complexity routing (nano/mini/standard/pro)
+    Orch->>Session: Load conversation history (last 20 turns)
+    Orch->>Orch: Build persona prompt + skill instructions
+    Orch->>LLM: Runner.run() with tools + session
+    loop Tool calls (max turns)
+        LLM-->>Orch: Tool call request
+        Orch->>Tools: Execute tool
+        Tools->>MCP: Google API call (if workspace tool)
+        MCP-->>Tools: Result
+        Tools-->>Orch: Tool result
+        Orch->>LLM: Continue with result
+    end
+    LLM-->>Orch: Final response
+    Orch->>Guard: Output PII check (context-aware)
+    alt PII detected (not email workflow)
+        Guard-->>User: ⚠️ Filtered response
+    end
+    Orch->>Session: Save to SDK RedisSession
+    Orch->>Mem: Store interaction (if memorable)
+    Orch-->>User: 📨 Response via Telegram
+    </pre>
+  </div>
+</section>
+
+<!-- ========== 3. AGENT ECOSYSTEM ========== -->
+<section id="agent-ecosystem">
+  <h2><span class="section-num">3.</span> Agent Ecosystem</h2>
+  <p class="subtitle">15 specialized agents working together under the orchestrator.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph LR
+    ORCH["🎯 Orchestrator<br/>(Office Organizer)"]
+
+    subgraph Workspace["Google Workspace Skills (direct tools)"]
+      GMAIL["📧 Gmail<br/>6 tools"]
+      CAL["📅 Calendar<br/>2 tools"]
+      TASK["✅ Tasks<br/>4 tools"]
+      DRIVE["📁 Drive<br/>7 tools"]
+      DOCS["📝 Docs<br/>7 tools"]
+      SHEETS["📊 Sheets<br/>6 tools"]
+      SLIDES["📽️ Slides<br/>5 tools"]
+      CONTACTS["👥 Contacts<br/>4 tools"]
+    end
+
+    subgraph Internal["Internal Skills (bound tools)"]
+      MEM["🧠 Memory<br/>7 tools"]
+      SCHED["⏰ Scheduler<br/>4 tools"]
+    end
+
+    subgraph Dynamic["Dynamic Plugins (src/tools/plugins/)"]
+      LINKEDIN["💼 LinkedIn<br/>11 tools"]
+      BROWSER["🌐 Browser<br/>12 tools"]
+    end
+
+    subgraph Handoff["Handoff Agents"]
+      FACTORY["🏭 Tool Factory"]
+      REPAIR["🔧 Repair Agent"]
+    end
+
+    subgraph Background["Background Agents"]
+      REFLECT["📊 Reflector<br/>(quality scoring)"]
+      CURATOR["📈 Curator<br/>(weekly improvement)"]
+      PERSONA["🎭 Persona Interview<br/>(3-session OCEAN profiling)"]
+    end
+
+    SAFETY["🛡️ Safety Agent<br/>(guardrails)"]
+
+    ORCH --> Workspace
+    ORCH --> Internal
+    ORCH --> Dynamic
+    ORCH -->|"handoff"| Handoff
+    ORCH <-.->|"guards every call"| SAFETY
+    ORCH -.->|"after response"| REFLECT
+    CURATOR -.->|"weekly"| REFLECT
+
+    style ORCH fill:#1a3a5c,stroke:#58a6ff,color:#e6edf3
+    style Workspace fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style Internal fill:#2d1f3a,stroke:#d2a8ff,color:#e6edf3
+    style Dynamic fill:#172336,stroke:#79c0ff,color:#e6edf3
+    style Handoff fill:#2d1f11,stroke:#ffa657,color:#e6edf3
+    style Background fill:#1a1e2e,stroke:#8b949e,color:#e6edf3
+    </pre>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">🎯</div>
+      <div class="card-title">Orchestrator</div>
+      <div class="card-desc">Main triage agent. Routes requests to specialists. Manages persona, complexity routing, SDK sessions, and action policy.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📧</div>
+      <div class="card-title">Email Agent</div>
+      <div class="card-desc">Gmail operations: read, search, draft, send, reply, filter. Uses thread_id/in_reply_to for threading.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📅</div>
+      <div class="card-title">Calendar Agent</div>
+      <div class="card-desc">Google Calendar: view events, create/update/delete. Explicit scope boundary — no tasks or reminders.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">✅</div>
+      <div class="card-title">Tasks Agent</div>
+      <div class="card-desc">Google Tasks API: list, create, update, complete tasks. Routed via temporal parser domain detection.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📁</div>
+      <div class="card-title">Drive Agent</div>
+      <div class="card-desc">Google Drive: search, list, upload, download, share, trash, manage files and folders.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📝</div>
+      <div class="card-title">Docs Agent</div>
+      <div class="card-desc">Google Docs: search, create, read, edit, find-replace, export documents.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📊</div>
+      <div class="card-title">Sheets Agent</div>
+      <div class="card-desc">Google Sheets: create, read, update, append, clear spreadsheet data.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📽️</div>
+      <div class="card-title">Slides Agent</div>
+      <div class="card-desc">Google Slides: create, view, batch update, get page thumbnails.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">👥</div>
+      <div class="card-title">Contacts Agent</div>
+      <div class="card-desc">Google People API: list, search, view, manage contacts.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧠</div>
+      <div class="card-title">Memory Agent</div>
+      <div class="card-desc">7 bound tools: recall, store, list, forget, forget-all, summarize session, get context. Mem0 + Qdrant backend.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">⏰</div>
+      <div class="card-title">Scheduler Agent</div>
+      <div class="card-desc">4 bound tools: create reminder (cron/interval/once), morning brief, list, cancel. Uses _impl pattern.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🏭</div>
+      <div class="card-title">Tool Factory</div>
+      <div class="card-desc">Handoff agent that generates CLI tools on demand. Standalone argparse scripts, sandboxed execution.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔧</div>
+      <div class="card-title">Repair Agent</div>
+      <div class="card-desc">Diagnostic-only. Analyzes errors and generates reports. Has NO codebase access — cannot fabricate file paths.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🎭</div>
+      <div class="card-title">Persona Interview</div>
+      <div class="card-desc">3-session structured interview for deep personality profiling (Stanford approach). Produces OCEAN scores + communication/work/values profile.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">💼</div>
+      <div class="card-title">LinkedIn Plugin</div>
+      <div class="card-desc">11 tools: profile, search, jobs, messaging, posts, invitations, page scraping. Uses crawl4ai authenticated scraper + linkedin-api.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🌐</div>
+      <div class="card-title">Browser Plugin</div>
+      <div class="card-desc">12 tools: navigate, click, fill, type, text, html, screenshot, page info, wait, login, close, web scrape. Playwright headless Chromium + crawl4ai.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 4. GOOGLE WORKSPACE ========== -->
+<section id="workspace">
+  <h2><span class="section-num">4.</span> Google Workspace Integration</h2>
+  <p class="subtitle">8 services, 45 direct tools — zero agent wrappers. Every tool is a function_tool closure bound at creation time.</p>
+
+  <div class="chart-row">
+    <div class="chart-box">
+      <h4>Tools per Google Service</h4>
+      <canvas id="toolsChart"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Integration Architecture</h4>
+      <div class="mermaid-wrap" style="background:transparent;padding:12px;">
+        <pre class="mermaid">
+graph TB
+    SKILL["Skill Registry"]
+    SKILL --> GMAIL_S["Gmail Skill<br/>6 tools"]
+    SKILL --> CAL_S["Calendar Skill<br/>2 tools"]
+    SKILL --> TASK_S["Tasks Skill<br/>4 tools"]
+    SKILL --> DRIVE_S["Drive Skill<br/>7 tools"]
+    SKILL --> DOCS_S["Docs Skill<br/>7 tools"]
+    SKILL --> SHEETS_S["Sheets Skill<br/>6 tools"]
+    SKILL --> SLIDES_S["Slides Skill<br/>5 tools"]
+    SKILL --> CONT_S["Contacts Skill<br/>4 tools"]
+
+    CWT["call_workspace_tool()<br/>(strips None, per-call lifecycle)"]
+
+    GMAIL_S --> CWT
+    CAL_S --> CWT
+    TASK_S --> CWT
+    DRIVE_S --> CWT
+    DOCS_S --> CWT
+    SHEETS_S --> CWT
+    SLIDES_S --> CWT
+    CONT_S --> CWT
+
+    CWT --> MCP["MCP Server<br/>(OAuth + API proxy)"]
+    MCP --> GOOGLE["Google APIs"]
+
+    style SKILL fill:#1a3a5c,stroke:#58a6ff,color:#e6edf3
+    style CWT fill:#2d1f11,stroke:#ffa657,color:#e6edf3
+    style MCP fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+        </pre>
+      </div>
+    </div>
+  </div>
+
+  <table>
+    <thead><tr><th>Service</th><th>Tools</th><th>Operations</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>📧 Gmail</td><td>6</td><td>Read, search, draft, send, reply, filter</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>📅 Calendar</td><td>2</td><td>Get events, manage events</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>✅ Tasks</td><td>4</td><td>List, create, update, complete</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>📁 Drive</td><td>7</td><td>Search, list, upload, download, share, trash, manage</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>📝 Docs</td><td>7</td><td>Search, create, read, edit, find-replace, export, manage</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>📊 Sheets</td><td>6</td><td>Create, read, update, append, clear, manage</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>📽️ Slides</td><td>5</td><td>Create, get, batch update, get page, thumbnail</td><td><span class="pill pill-green">Active</span></td></tr>
+      <tr><td>👥 Contacts</td><td>4</td><td>List, get, search, manage</td><td><span class="pill pill-green">Active</span></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ========== 5. MEMORY ARCHITECTURE ========== -->
+<section id="memory">
+  <h2><span class="section-num">5.</span> Memory Architecture</h2>
+  <p class="subtitle">Three-layer memory system: SDK conversation history, Redis sessions, and Mem0 long-term memory.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph TB
+    subgraph STM["Short-Term Memory"]
+      SDK_SESS["SDK RedisSession<br/>agent_session:{telegram_id}<br/>Last 20 turns<br/>(messages + tool calls)"]
+      CONV["Redis Conv Store<br/>conv:{user_id}<br/>30-min TTL<br/>(state: pending sends, scores)"]
+    end
+
+    subgraph LTM["Long-Term Memory (Mem0 + Qdrant)"]
+      EPISODIC["Episodic Memory<br/>(conversation archives)"]
+      SEMANTIC["Semantic Memory<br/>(user preferences, facts)"]
+      PROCEDURAL["Procedural Memory<br/>(learned workflows)"]
+    end
+
+    subgraph Tools["Memory Tools (7)"]
+      T1["recall_memory"]
+      T2["store_memory"]
+      T3["list_memories"]
+      T4["forget_memory"]
+      T5["forget_all"]
+      T6["summarize_session"]
+      T7["get_context"]
+    end
+
+    USER["User Message"] --> SDK_SESS
+    SDK_SESS -->|"history"| ORCH["Orchestrator"]
+    CONV -->|"state"| ORCH
+    ORCH --> Tools
+    Tools <--> LTM
+    CONV -->|"archive on expiry"| EPISODIC
+    LTM -->|"dedup check<br/>0.85 cosine"| LTM
+
+    style STM fill:#172336,stroke:#58a6ff,color:#e6edf3
+    style LTM fill:#261d36,stroke:#d2a8ff,color:#e6edf3
+    style Tools fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    </pre>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">⚡</div>
+      <div class="card-title">SDK RedisSession</div>
+      <div class="card-desc">Real conversation turns (user, assistant, tool calls). Filtered to exclude stale function_call items. 20-turn cap.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📦</div>
+      <div class="card-title">Redis Conv Store</div>
+      <div class="card-desc">Application state: pending email sends, quality scores, task list cache (30s TTL). 30-min session TTL.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧠</div>
+      <div class="card-title">Mem0 + Qdrant</div>
+      <div class="card-desc">Long-term semantic memory with dedup (0.85 cosine). Access-count tracking for curator pruning.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 6. SCHEDULER ========== -->
+<section id="scheduler">
+  <h2><span class="section-num">6.</span> Scheduler Workflow</h2>
+  <p class="subtitle">APScheduler 4.x with PostgreSQL job store. Supports cron, interval, and one-shot triggers.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph LR
+    USER["User: 'Remind me<br/>today at 3pm'"] --> ORCH["Orchestrator"]
+    ORCH -->|"temporal parse"| TEMPORAL["Temporal Parser<br/>(domain: scheduler)"]
+    ORCH -->|"tool call"| BOUND["create_my_reminder<br/>(bound tool)"]
+    BOUND -->|"delegates to"| IMPL["_create_reminder_impl<br/>(plain async fn)"]
+    IMPL -->|"schedule_type: once"| ENGINE["APScheduler Engine"]
+    ENGINE -->|"DateTrigger(run_time=dt)"| JOBSTORE["PostgreSQL<br/>Job Store"]
+    ENGINE -->|"at scheduled time"| JOB["send_reminder()<br/>job callable"]
+    JOB -->|"Telegram message"| USER2["User gets<br/>reminder 📱"]
+
+    style IMPL fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style ENGINE fill:#172336,stroke:#58a6ff,color:#e6edf3
+    </pre>
+  </div>
+
+  <h3>Trigger Types</h3>
+  <table>
+    <thead><tr><th>Type</th><th>Example</th><th>APScheduler Trigger</th><th>Persistence</th></tr></thead>
+    <tbody>
+      <tr><td><span class="pill pill-blue">once</span></td><td>"Remind me today at 3pm"</td><td>DateTrigger(run_time=...)</td><td>Survives restart ✅</td></tr>
+      <tr><td><span class="pill pill-purple">cron</span></td><td>"Every Monday at 9am"</td><td>CronTrigger(day_of_week=...)</td><td>Survives restart ✅</td></tr>
+      <tr><td><span class="pill pill-orange">interval</span></td><td>"Every 2 hours"</td><td>IntervalTrigger(hours=2)</td><td>Survives restart ✅</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Key Pattern: _impl Functions</h3>
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph TB
+    subgraph "Why _impl pattern exists"
+      FT["@function_tool decorator"] -->|"produces"| FTO["FunctionTool object<br/>(NOT callable!)"]
+      FTO -.->|"❌ await FunctionTool()"| ERR["TypeError: FunctionTool<br/>is not callable"]
+
+      IMPL2["_create_reminder_impl()<br/>(plain async function)"]
+      FT2["@function_tool wrapper"] -->|"delegates to"| IMPL2
+      BT["Bound tool closure"] -->|"delegates to"| IMPL2
+      IMPL2 -->|"✅ works"| OK["Success"]
+    end
+
+    style ERR fill:#3d1418,stroke:#f78166,color:#e6edf3
+    style OK fill:#1a3a2a,stroke:#3fb950,color:#e6edf3
+    </pre>
+  </div>
+</section>
+
+<!-- ========== 7. SAFETY & GUARDRAILS ========== -->
+<section id="safety">
+  <h2><span class="section-num">7.</span> Safety & Guardrails</h2>
+  <p class="subtitle">Multi-layer security: authentication, input injection detection, output PII filtering, tool sandboxing.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph TB
+    MSG["Incoming Message"]
+    MSG --> AUTH{"Auth Check<br/>(Telegram ID allowlist)"}
+    AUTH -->|"❌ Unauthorized"| SILENT["Silent reject"]
+    AUTH -->|"✅ Allowed"| INPUT["Input Guardrail"]
+
+    INPUT --> PATTERN{"Pattern Check<br/>(known injection patterns)"}
+    PATTERN -->|"match"| BLOCK1["🚫 Block + log"]
+    PATTERN -->|"clean"| LLM_CHECK{"LLM Safety Check<br/>(gpt-4.1-nano)"}
+    LLM_CHECK -->|"unsafe"| BLOCK2["🚫 Block + log"]
+    LLM_CHECK -->|"safe"| BYPASS{"Bypass Check"}
+
+    BYPASS -->|"owner maintenance?"| SKIP["Skip guardrail"]
+    BYPASS -->|"contextual confirmation?"| SKIP
+    BYPASS -->|"normal request"| ORCH["Orchestrator processes"]
+
+    ORCH --> OUTPUT["Output Guardrail"]
+    OUTPUT --> PII{"PII Pattern Check<br/>(SSN, CC, email)"}
+    PII -->|"email found"| CTX{"Context-Aware Check"}
+    CTX -->|"user asked for email"| ALLOW["✅ Allow"]
+    CTX -->|"no email context"| MARKER{"Output Marker Fallback"}
+    MARKER -->|"workspace markers"| ALLOW
+    MARKER -->|"no markers"| REDACT["🚫 Redact + warn"]
+    PII -->|"SSN/CC found"| REDACT
+    PII -->|"clean"| ALLOW
+
+    ALLOW --> USER["📤 Send to user"]
+
+    style BLOCK1 fill:#3d1418,stroke:#f78166,color:#e6edf3
+    style BLOCK2 fill:#3d1418,stroke:#f78166,color:#e6edf3
+    style REDACT fill:#3d1418,stroke:#f78166,color:#e6edf3
+    style ALLOW fill:#1a3a2a,stroke:#3fb950,color:#e6edf3
+    </pre>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">🔐</div>
+      <div class="card-title">Authentication</div>
+      <div class="card-desc">DB-backed Telegram user ID allowlist. Owner manages via /allow and /revoke commands.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🛡️</div>
+      <div class="card-title">Input Guardrail</div>
+      <div class="card-desc">Pattern matching + fast LLM check (gpt-4.1-nano). Blocks prompt injection attempts.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔍</div>
+      <div class="card-title">Context-Aware PII</div>
+      <div class="card-desc">Two-layer output check: (1) user message context for email workflows, (2) output marker fallback. Prevents false positives.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📦</div>
+      <div class="card-title">Tool Sandbox</div>
+      <div class="card-desc">Generated CLI tools run in empty environment. No access to API keys. Timeout + static analysis + user approval.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">💰</div>
+      <div class="card-title">Cost Caps</div>
+      <div class="card-desc">Daily and monthly spend limits. 80% alert, 100% block. Tracked in PostgreSQL.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📋</div>
+      <div class="card-title">Audit Logging</div>
+      <div class="card-desc">Every interaction logged: agent, tools used, cost, duration, errors.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 8. DOCKER INFRASTRUCTURE ========== -->
+<section id="infra">
+  <h2><span class="section-num">8.</span> Docker Infrastructure</h2>
+  <p class="subtitle">5 services running in Docker Compose. All data self-hosted — zero SaaS calls for storage.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph LR
+    subgraph DockerCompose["Docker Compose Stack"]
+      ASS["🤖 assistant<br/>(Python 3.12)<br/>Bot + Agents + Scheduler"]
+      PG["🐘 postgres:17<br/>Port 5432<br/>Users, tasks, audit,<br/>APScheduler jobs"]
+      QD["🔍 qdrant<br/>Port 6333<br/>Vector memory<br/>(Mem0 backend)"]
+      RD["⚡ redis:7<br/>Port 6379<br/>Sessions, cache,<br/>SDK agent sessions"]
+      MCP["🔌 workspace-mcp<br/>Port 8081<br/>Google OAuth proxy"]
+    end
+
+    ASS <-->|"SQLAlchemy"| PG
+    ASS <-->|"Mem0 client"| QD
+    ASS <-->|"aioredis"| RD
+    ASS <-->|"HTTP"| MCP
+    MCP <-->|"OAuth 2.0"| GOOGLE["☁️ Google APIs"]
+    ASS <-->|"Bot API"| TG["📱 Telegram"]
+    ASS <-->|"Responses API"| OAI["🧠 OpenAI"]
+
+    style DockerCompose fill:#0d1117,stroke:#30363d,color:#e6edf3
+    style ASS fill:#1a3a5c,stroke:#58a6ff,color:#e6edf3
+    style PG fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style QD fill:#261d36,stroke:#d2a8ff,color:#e6edf3
+    style RD fill:#2d1f11,stroke:#ffa657,color:#e6edf3
+    style MCP fill:#2d1a1a,stroke:#f78166,color:#e6edf3
+    </pre>
+  </div>
+
+  <table>
+    <thead><tr><th>Service</th><th>Image</th><th>Port</th><th>Data Volume</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>assistant</td><td>Custom (Python 3.12)</td><td>—</td><td>src/tools/plugins/</td><td>Main app: bot, agents, scheduler</td></tr>
+      <tr><td>postgres</td><td>postgres:17</td><td>5432 (internal)</td><td>postgres_data</td><td>Database + APScheduler job store</td></tr>
+      <tr><td>qdrant</td><td>qdrant/qdrant</td><td>6333 (internal)</td><td>qdrant_data</td><td>Vector store (Mem0 backend)</td></tr>
+      <tr><td>redis</td><td>redis:7</td><td>6379 (internal)</td><td>redis_data</td><td>Sessions, cache, SDK agent sessions</td></tr>
+      <tr><td>workspace-mcp</td><td>workspace MCP</td><td>8081 (internal)</td><td>—</td><td>Google OAuth proxy</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ========== 9. KEY DESIGN DECISIONS ========== -->
+<section id="decisions">
+  <h2><span class="section-num">9.</span> Key Design Decisions</h2>
+  <p class="subtitle">Architectural choices that define the system.</p>
+
+  <table>
+    <thead><tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr></thead>
+    <tbody>
+      <tr><td>Single async process</td><td>Bot + agents + scheduler in one Python process</td><td>Simplicity. One process, one deployment unit.</td></tr>
+      <tr><td>Direct tools over agent wrappers</td><td>All 45 Workspace tools are function_tool closures</td><td>Single LLM call per request. No nested agent reasoning overhead.</td></tr>
+      <tr><td>_impl pattern for bound tools</td><td>Plain async functions, not FunctionTool objects</td><td>FunctionTool is not callable. Prevents runtime TypeError.</td></tr>
+      <tr><td>SDK RedisSession</td><td>Real conversation turns, not system-prompt embedding</td><td>LLM sees tool results, resolves references like "send it".</td></tr>
+      <tr><td>Context-aware PII guardrails</td><td>User message passed via Runner context</td><td>Prevents false positives on email workflows.</td></tr>
+      <tr><td>Defensive MCP integration</td><td>Strip None values, correct schema fields</td><td>MCP server uses additionalProperties: false.</td></tr>
+      <tr><td>Sequential per-user queue</td><td>asyncio.Queue per user_id</td><td>Prevents race conditions in multi-turn conversations.</td></tr>
+      <tr><td>CLI-first tool creation</td><td>argparse scripts over MCP servers</td><td>Simpler, sandboxable, no discovery overhead.</td></tr>
+      <tr><td>Prompt cache optimization</td><td>Static content first, dynamic content last</td><td>41-80% cost reduction via OpenAI prompt caching.</td></tr>
+      <tr><td>Memory deduplication</td><td>0.85 cosine similarity check before store</td><td>Prevents duplicate memories accumulating.</td></tr>
+      <tr><td>Stale session recovery</td><td>Catch BadRequestError, clear session, retry once</td><td>Graceful recovery from corrupt SDK sessions.</td></tr>
+      <tr><td>Repair agent honesty</td><td>No codebase access, cannot fabricate paths</td><td>Prevents hallucinated patches that confuse users.</td></tr>
+      <tr><td>Generic web scraper</td><td>crawl4ai + SiteLoginConfig registry</td><td>Zero per-site scraper code. Add a site by declaring login selectors. LLM parses markdown itself.</td></tr>
+      <tr><td>Tools consolidated into src/</td><td>tools/ merged into src/tools/plugins/</td><td>Single source tree. Linting, typing, imports consistent. Tool Factory writes to same tree.</td></tr>
+      <tr><td>Persona interview (Stanford)</td><td>3-session structured OCEAN profiling</td><td>Replicates personality 85% accurately per Stanford research. Deep profile injected into system prompt.</td></tr>
+      <tr><td>PruningContentFilter for SPAs</td><td>crawl4ai threshold=0.48 + _clean_markdown()</td><td>LinkedIn pages have 400K+ of JSON blobs. Filter strips noise, post-processor removes tracking data.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ========== 10. BUG FIX TIMELINE ========== -->
+<section id="bugs">
+  <h2><span class="section-num">10.</span> Bug Fix Timeline</h2>
+  <p class="subtitle">16 significant bugs discovered and fixed during development (March 18–22, 2026).</p>
+
+  <div class="chart-row chart-row-full">
+    <div class="chart-box">
+      <h4>Bugs Fixed by Category</h4>
+      <canvas id="bugsChart"></canvas>
+    </div>
+  </div>
+
+  <div class="timeline">
+    <div class="timeline-item">
+      <div class="date">March 18, 2026</div>
+      <div class="title">Shared MCP instance broke sub-agent calls</div>
+      <div class="desc">Lifecycle conflicts when SDK Runner managed shared MCP server. Fix: per-call MCP lifecycle.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 18, 2026</div>
+      <div class="title">Safety guardrail false positives on maintenance</div>
+      <div class="desc">Owner maintenance requests flagged as unsafe. Fix: _is_owner_maintenance_request() bypass.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 19, 2026</div>
+      <div class="title">Calendar returned wrong dates (June not March)</div>
+      <div class="desc">Persona prompt had no current datetime. Model guessed wrong. Fix: runtime datetime injection.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 19, 2026</div>
+      <div class="title">PII guardrail blocked email drafts</div>
+      <div class="desc">Narrow output marker allowlist. Fix: expanded markers for draft/send phrasings.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 19, 2026</div>
+      <div class="title">"Something went wrong" for output guardrail trips</div>
+      <div class="desc">Only caught InputGuardrailTripwireTriggered. Fix: added OutputGuardrailTripwireTriggered handler.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 19, 2026</div>
+      <div class="title">"Send it" after draft loops forever</div>
+      <div class="desc">Pending payload gate too narrow. Fix: broader _is_email_related_request() check.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 19, 2026</div>
+      <div class="title">Tasks routed to calendar agent</div>
+      <div class="desc">No task-capable tool exposed. Fix: explicit tool routing rules + scheduler binding.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 20, 2026</div>
+      <div class="title">Gmail send rejected by MCP server</div>
+      <div class="desc">reply_to_message_id not in MCP schema. Fix: replaced with thread_id/in_reply_to.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 20, 2026</div>
+      <div class="title">Stale session 400 errors</div>
+      <div class="desc">Orphaned function_call_output items in SDK session. Fix: filter history + catch-and-retry.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 20, 2026</div>
+      <div class="title">Reminder tool errored — DateTrigger API</div>
+      <div class="desc">APScheduler 4.x uses run_time, not run_date. Fix: parameter rename + timezone hardening.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 20, 2026</div>
+      <div class="title">FunctionTool object is not callable</div>
+      <div class="desc">Bound tools called @function_tool objects directly. Fix: extracted _*_impl pattern.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 20, 2026</div>
+      <div class="title">Repair agent hallucinated patches</div>
+      <div class="desc">No codebase access but fabricated file paths. Fix: honest instructions about limitations.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 21, 2026</div>
+      <div class="title">LinkedIn Voyager profileView API deprecated (410)</div>
+      <div class="desc">Custom DOM scraper and Voyager API both broken. Fix: replaced 598 lines with crawl4ai generic authenticated scraper.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 21, 2026</div>
+      <div class="title">crawl4ai returned JSON blobs instead of rendered content</div>
+      <div class="desc">LinkedIn SPA needs JS rendering time. Fix: delay_before_return_html=3.0 + PruningContentFilter + _clean_markdown() post-processor.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 21, 2026</div>
+      <div class="title">crawl4ai login hook timed out on LinkedIn</div>
+      <div class="desc">wait_until="networkidle" stalls on JS-heavy SPAs. Fix: switched to "domcontentloaded", increased timeout to 60s.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">March 22, 2026</div>
+      <div class="title">Dynamic tools invisible after consolidation</div>
+      <div class="desc">Moved tools/ → src/tools/plugins/ but registry still pointed to old path. Fix: updated Path constant + volume mount + Dockerfile.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 11. PROJECT STATISTICS ========== -->
+<section id="stats">
+  <h2><span class="section-num">11.</span> Project Statistics</h2>
+  <p class="subtitle">Current state as of March 22, 2026.</p>
+
+  <div class="chart-row">
+    <div class="chart-box">
+      <h4>Agent Types Distribution</h4>
+      <canvas id="agentTypesChart"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Test Files Coverage</h4>
+      <canvas id="testsChart"></canvas>
+    </div>
+  </div>
+
+  <div class="chart-row">
+    <div class="chart-box">
+      <h4>Tool Distribution (All 75 Tools)</h4>
+      <canvas id="allToolsChart"></canvas>
+    </div>
+    <div class="chart-box">
+      <h4>Architecture Decision Records</h4>
+      <canvas id="adrChart"></canvas>
+    </div>
+  </div>
+
+  <h3>Quick Numbers</h3>
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">📁</div>
+      <div class="card-title">17 Agent Files</div>
+      <div class="card-desc">orchestrator, email, calendar, tasks, drive, docs, sheets, slides, contacts, memory, scheduler, tool_factory, repair, reflector, curator, safety, persona_interview</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🧪</div>
+      <div class="card-title">22 Test Files</div>
+      <div class="card-desc">630 tests passing locally. Covers orchestration, safety, tools, Google Workspace, persona, scheduler, memory.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📝</div>
+      <div class="card-title">11 ADRs</div>
+      <div class="card-desc">Architecture Decision Records covering OAuth, orchestration, audit, skills, guardrails, sessions, scheduler, persona interview.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🐛</div>
+      <div class="card-title">16 Bugs Fixed</div>
+      <div class="card-desc">All found and resolved between March 18–22, 2026. Regression tests added for each.</div>
+    </div>
+  </div>
+</section>
+
+</div><!-- /container -->
+
+<footer>
+  <div class="container">
+    PersonalAsst Architecture Report — Generated March 22, 2026 &nbsp;|&nbsp; Private Repository. All rights reserved.
+  </div>
+</footer>
+
+<script>
+// Initialize Mermaid
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    primaryColor: '#1a3a5c',
+    primaryTextColor: '#e6edf3',
+    primaryBorderColor: '#58a6ff',
+    lineColor: '#58a6ff',
+    secondaryColor: '#261d36',
+    tertiaryColor: '#1a2d1a',
+    background: '#161b22',
+    mainBkg: '#161b22',
+    nodeBorder: '#30363d',
+    clusterBkg: '#0d1117',
+    clusterBorder: '#30363d',
+    titleColor: '#e6edf3',
+    edgeLabelBackground: '#161b22',
+    actorBkg: '#1a3a5c',
+    actorBorder: '#58a6ff',
+    actorTextColor: '#e6edf3',
+    signalColor: '#58a6ff',
+    signalTextColor: '#e6edf3',
+    noteBkgColor: '#261d36',
+    noteTextColor: '#e6edf3',
+    activationBorderColor: '#58a6ff',
+    sequenceNumberColor: '#e6edf3',
+  },
+  flowchart: { curve: 'basis', htmlLabels: true, padding: 20, nodeSpacing: 60, rankSpacing: 70 },
+  sequence: { actorMargin: 80, mirrorActors: false, width: 200, height: 50, messageMargin: 40, boxMargin: 15, noteMargin: 15, actorFontSize: 16, messageFontSize: 15 },
+  fontSize: 16,
+});
+
+// Chart.js global config
+Chart.defaults.color = '#8b949e';
+Chart.defaults.borderColor = '#30363d';
+Chart.defaults.font.family = '-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif';
+Chart.defaults.font.size = 14;
+
+// 1. Tools per Google Service (bar chart)
+new Chart(document.getElementById('toolsChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Gmail', 'Calendar', 'Tasks', 'Drive', 'Docs', 'Sheets', 'Slides', 'Contacts'],
+    datasets: [{
+      label: 'Tools',
+      data: [6, 2, 4, 7, 7, 6, 5, 4],
+      backgroundColor: ['#58a6ff', '#3fb950', '#d2a8ff', '#ffa657', '#f78166', '#79c0ff', '#ff7b72', '#56d364'],
+      borderRadius: 6,
+      borderSkipped: false,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      y: { beginAtZero: true, ticks: { stepSize: 1 } },
+      x: { grid: { display: false } }
+    }
+  }
+});
+
+// 2. Bugs by category (horizontal bar)
+new Chart(document.getElementById('bugsChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Guardrail / Safety', 'MCP / Schema', 'Scheduler / APScheduler', 'Session / Memory', 'Routing / Logic', 'Agent Behavior', 'Web Scraping / crawl4ai'],
+    datasets: [{
+      label: 'Bugs Fixed',
+      data: [3, 2, 2, 2, 2, 1, 4],
+      backgroundColor: ['#f78166', '#ffa657', '#58a6ff', '#d2a8ff', '#3fb950', '#79c0ff', '#56d364'],
+      borderRadius: 6,
+      borderSkipped: false,
+    }]
+  },
+  options: {
+    indexAxis: 'y',
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { beginAtZero: true, ticks: { stepSize: 1 } },
+      y: { grid: { display: false } }
+    }
+  }
+});
+
+// 3. Agent types (doughnut)
+new Chart(document.getElementById('agentTypesChart'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Workspace Skills (8)', 'Internal Skills (2)', 'Dynamic Plugins (2)', 'Handoff Agents (2)', 'Background (3)', 'Guardrail (1)'],
+    datasets: [{
+      data: [8, 2, 2, 2, 3, 1],
+      backgroundColor: ['#3fb950', '#d2a8ff', '#79c0ff', '#ffa657', '#8b949e', '#f78166'],
+      borderColor: '#161b22',
+      borderWidth: 3,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { position: 'bottom', labels: { padding: 12, usePointStyle: true, pointStyle: 'circle' } }
+    }
+  }
+});
+
+// 4. Test files (bar)
+new Chart(document.getElementById('testsChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Orchestrator', 'Tool Factory', 'Safety', 'Google Tools', 'Action Policy', 'Persona', 'Scheduler', 'Memory', 'Workspace', 'Phase6', 'Others'],
+    datasets: [{
+      label: 'Test areas',
+      data: [85, 72, 62, 55, 48, 27, 30, 28, 25, 22, 176],
+      backgroundColor: '#58a6ff88',
+      borderColor: '#58a6ff',
+      borderWidth: 1,
+      borderRadius: 4,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      y: { beginAtZero: true, title: { display: true, text: 'Approx. test count' } },
+      x: { grid: { display: false }, ticks: { maxRotation: 45 } }
+    }
+  }
+});
+
+// 5. All tools distribution (polar area)
+new Chart(document.getElementById('allToolsChart'), {
+  type: 'polarArea',
+  data: {
+    labels: ['Gmail (6)', 'Calendar (2)', 'Tasks (4)', 'Drive (7)', 'Docs (7)', 'Sheets (6)', 'Slides (5)', 'Contacts (4)', 'Memory (7)', 'Scheduler (4)', 'LinkedIn (11)', 'Browser (12)'],
+    datasets: [{
+      data: [6, 2, 4, 7, 7, 6, 5, 4, 7, 4, 11, 12],
+      backgroundColor: [
+        '#58a6ff88', '#3fb95088', '#d2a8ff88', '#ffa65788', '#f7816688', '#79c0ff88',
+        '#ff7b7288', '#56d36488', '#b084f488', '#ff9f4388', '#79c0ff88', '#c9d1d988'
+      ],
+      borderColor: '#161b22',
+      borderWidth: 2,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: {
+      legend: { position: 'right', labels: { padding: 8, usePointStyle: true, pointStyle: 'circle', font: { size: 11 } } }
+    },
+    scales: { r: { ticks: { stepSize: 2 } } }
+  }
+});
+
+// 6. ADR timeline (bar)
+new Chart(document.getElementById('adrChart'), {
+  type: 'bar',
+  data: {
+    labels: ['Mar 16', 'Mar 17', 'Mar 18', 'Mar 19', 'Mar 20', 'Mar 21'],
+    datasets: [{
+      label: 'ADRs Written',
+      data: [1, 1, 2, 4, 5, 1],
+      backgroundColor: '#d2a8ff88',
+      borderColor: '#d2a8ff',
+      borderWidth: 1,
+      borderRadius: 4,
+    }]
+  },
+  options: {
+    responsive: true,
+    plugins: { legend: { display: false } },
+    scales: {
+      y: { beginAtZero: true, ticks: { stepSize: 1 }, title: { display: true, text: 'ADRs' } },
+      x: { grid: { display: false }, title: { display: true, text: 'Date (2026)' } }
+    }
+  }
+});
+</script>
+
+</body>
+</html>

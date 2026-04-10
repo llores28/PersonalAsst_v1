@@ -1,0 +1,6 @@
+{
+  "tests/test_repair_flow.py::TestRepairRepoHelpers::test_search_repo_finds_matches": true,
+  "tests/test_repair_flow.py::TestRepairRepoHelpers::test_read_repo_file_returns_numbered_lines": true,
+  "tests/test_repair_flow.py::TestRepairPlanStorage::test_store_repair_plan_records_payload": true,
+  "tests/test_repair_flow.py::TestRepairPlanStorage::test_store_repair_plan_rejects_mismatched_patch_path": true
+}

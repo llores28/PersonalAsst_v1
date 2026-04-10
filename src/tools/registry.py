@@ -1,4 +1,4 @@
-"""Tool registry — discovers tools from tools/ directory, supports hot-reload.
+"""Tool registry — discovers tools from src/tools/plugins/ directory, supports hot-reload.
 
 Resolves PRD gap B2 (agent registration at runtime) via filesystem watching.
 """
@@ -12,13 +12,12 @@ from agents import function_tool
 
 from src.tools.manifest import ToolManifest
 from src.tools.sandbox import run_cli_tool
-from src.settings import settings
 
 logger = logging.getLogger(__name__)
 
 
 class ToolRegistry:
-    """Discovers tools from tools/ directory, hot-reloads on changes."""
+    """Discovers tools from src/tools/plugins/ directory, hot-reloads on changes."""
 
     def __init__(self, tools_dir: Path):
         self.tools_dir = tools_dir
@@ -27,7 +26,7 @@ class ToolRegistry:
         self._observer = None
 
     async def load_all(self) -> list[Callable]:
-        """Scan tools/ for manifest.json files, load all valid tools."""
+        """Scan plugins dir for manifest.json files, load all valid tools."""
         if not self.tools_dir.exists():
             logger.warning("Tools directory does not exist: %s", self.tools_dir)
             return []
@@ -52,13 +51,20 @@ class ToolRegistry:
 
         if manifest.type == "cli":
             wrapper_func = self._create_cli_wrapper(tool_dir, manifest)
+            self._tools[manifest.name] = wrapper_func
         elif manifest.type == "function":
-            wrapper_func = self._load_function_wrapper(tool_dir, manifest)
+            result = self._load_function_wrapper(tool_dir, manifest)
+            if isinstance(result, list):
+                # Multi-tool: register each tool individually
+                for tool_fn in result:
+                    fn_name = getattr(tool_fn, "name", None) or getattr(tool_fn, "__name__", manifest.name)
+                    self._tools[fn_name] = tool_fn
+            else:
+                self._tools[manifest.name] = result
         else:
             logger.warning("Skipping tool %s: unsupported type '%s'", manifest.name, manifest.type)
             return
 
-        self._tools[manifest.name] = wrapper_func
         self._manifests[manifest.name] = manifest
         logger.info("Tool registered: %s (type=%s)", manifest.name, manifest.type)
 
@@ -68,6 +74,7 @@ class ToolRegistry:
         timeout = manifest.timeout_seconds
         tool_name = manifest.name
         description = manifest.description
+        credential_keys = list(manifest.credentials.keys()) if manifest.credentials else None
 
         @function_tool(name_override=tool_name, description_override=description)
         async def cli_wrapper(**kwargs: str) -> str:
@@ -76,7 +83,9 @@ class ToolRegistry:
                 args.extend([f"--{key}", str(value)])
 
             rc, stdout, stderr = await run_cli_tool(
-                tool_dir, entrypoint, args, timeout=timeout
+                tool_dir, entrypoint, args,
+                timeout=timeout,
+                credential_keys=credential_keys,
             )
 
             if rc != 0:
@@ -86,7 +95,12 @@ class ToolRegistry:
         return cli_wrapper
 
     def _load_function_wrapper(self, tool_dir: Path, manifest: ToolManifest) -> Callable:
-        """Load a Python function_tool wrapper from the tool directory."""
+        """Load a Python function_tool wrapper from the tool directory.
+
+        The wrapper module must expose either:
+        - ``tool_functions`` (list) — multiple function_tools to register
+        - ``tool_function`` — a single function_tool
+        """
         wrapper_path = tool_dir / manifest.wrapper
         if not wrapper_path.exists():
             raise FileNotFoundError(f"Wrapper not found: {wrapper_path}")
@@ -97,9 +111,15 @@ class ToolRegistry:
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
 
+        # Multi-tool: module exposes a list of function_tools
+        if hasattr(module, "tool_functions"):
+            return module.tool_functions  # list[Callable]
+
         if hasattr(module, "tool_function"):
             return module.tool_function
-        raise AttributeError(f"Wrapper {wrapper_path} missing 'tool_function' attribute")
+        raise AttributeError(
+            f"Wrapper {wrapper_path} missing 'tool_function' or 'tool_functions' attribute"
+        )
 
     def get_tool(self, name: str) -> Optional[Callable]:
         """Get a registered tool by name."""
@@ -122,7 +142,7 @@ class ToolRegistry:
         ]
 
     async def start_watching(self) -> None:
-        """Watch tools/ directory for new/changed tools (hot-reload).
+        """Watch plugins directory for new/changed tools (hot-reload).
 
         Uses watchdog to monitor filesystem changes. When a new manifest.json
         appears, the tool is loaded and registered automatically.
@@ -179,7 +199,7 @@ async def get_registry() -> ToolRegistry:
     """Get or create the singleton tool registry."""
     global _registry
     if _registry is None:
-        _registry = ToolRegistry(Path("tools"))
+        _registry = ToolRegistry(Path("src/tools/plugins"))
         await _registry.load_all()
         await _registry.start_watching()
     return _registry

@@ -1,3 +1,6 @@
+---
+trigger: always_on
+---
 # Change Safety & Testing
 
 ## Change Policy
@@ -15,18 +18,23 @@
 - **Tool tests:** Every generated CLI tool must pass its sandbox test before registration.
 - Framework: `pytest` with `pytest-asyncio` for async tests.
 - Mocking: Use `unittest.mock` for OpenAI API calls in tests (never hit real API in CI).
+- Install test tooling with `python -m pip install -r requirements-dev.txt` from an activated virtual environment.
+- During debugging, run the smallest relevant test file first, then run the full suite before finishing.
 
 ## Test Commands
 
 ```bash
 # Run all tests
-pytest tests/ -v
+python -m pytest tests/ -v
 
 # Run specific test file
-pytest tests/test_orchestrator.py -v
+python -m pytest tests/test_orchestrator.py -v
+
+# Verify test discovery
+python -m pytest tests/ --collect-only
 
 # Run with coverage
-pytest tests/ --cov=src --cov-report=term-missing
+python -m pytest tests/ --cov=src --cov-report=term-missing
 ```
 
 ## Type Checking
@@ -50,7 +58,7 @@ ruff format src/ tests/
 
 1. `ruff check` passes
 2. `mypy src/` passes (or has only known exclusions)
-3. `pytest tests/` passes
+3. `python -m pytest tests/` passes
 4. No new secrets in code (`grep -r "sk-" src/` returns nothing)
 5. Docker Compose still builds: `docker compose build`
 

@@ -3,10 +3,20 @@
 Resolves PRD gap A2 (tool manifest format).
 """
 
-from datetime import datetime
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+
+class ToolCredential(BaseModel):
+    """Schema for a declared credential a tool requires."""
+
+    description: str = Field(description="What this credential is for")
+    required: bool = Field(default=True)
+    env_var_hint: str = Field(
+        default="",
+        description="Hint for the env var name the user should set (e.g. LINKEDIN_EMAIL)",
+    )
 
 
 class ToolParameter(BaseModel):
@@ -34,6 +44,14 @@ class ToolManifest(BaseModel):
     requires_approval: bool = Field(default=False)
     requires_network: bool = Field(default=False)
     allowed_hosts: list[str] = Field(default_factory=list)
+    credentials: dict[str, ToolCredential] = Field(
+        default_factory=dict,
+        description="Declared credentials the tool needs (key = credential name)",
+    )
+    dependencies: list[str] = Field(
+        default_factory=list,
+        description="Python packages required (e.g. ['linkedin-api>=2.0.0'])",
+    )
     created_at: Optional[str] = Field(default=None)
     created_by: str = Field(default="manual", description="manual | tool_factory")
 

@@ -57,15 +57,31 @@ pytest tests/ -v -m integration
 
 ```
 tests/
-├── conftest.py              # Shared fixtures (mock agents, DB setup)
-├── test_orchestrator.py     # Orchestrator routing tests
-├── test_tools.py            # Tool registry, manifest validation
-├── test_memory.py           # Mem0 integration, Redis sessions
-├── test_scheduler.py        # APScheduler job creation/execution
-├── test_guardrails.py       # Input/output guardrail tests
-├── test_bot.py              # Telegram handler tests
-└── test_persona.py          # Persona CRUD, versioning
+├── conftest.py                                  # Shared fixtures (env vars, mock setup)
+├── test_action_policy.py                        # Action policy classification + confirmation cues
+├── test_clarification.py                        # Needs-input clarification contract
+├── test_google_audit.py                         # Google Workspace audit harness
+├── test_google_integration.py                   # Google API integration (requires Docker)
+├── test_google_tools_qa.py                      # Google tools Q&A validation
+├── test_google_tools_validation.py              # Gmail/Calendar/Tasks/Drive tool schema tests
+├── test_memory.py                               # Mem0 integration, Redis sessions
+├── test_model_router.py                         # Model selection + complexity routing
+├── test_orchestrator.py                         # Orchestrator routing, session filtering, email flows
+├── test_phase6.py                               # Phase 6 features (reflector, curator, repair)
+├── test_reflector_agent.py                      # Quality scoring + trend tracking
+├── test_repair_agent.py                         # Repair agent creation + read-only contract
+├── test_safety_agent.py                         # Input/output guardrails + context-aware PII
+├── test_scheduler.py                            # APScheduler engine, bound tools, DateTrigger
+├── test_security_challenge.py                   # PIN/security question challenge gate
+├── test_skill_registry.py                       # Unified skill registry
+├── test_temporal.py                             # Temporal parser + domain routing
+├── test_tools.py                                # Tool registry, manifest validation, sandbox
+├── test_workspace.py                            # MCP client, None-stripping, tool params
+└── test_workspace_mcp_oauth_responses_override.py # OAuth response override tests
 ```
+
+**Current count:** 493+ passing, 30 pre-existing SDK-absent failures (these tests import `agents` SDK which is only available inside Docker — they pass in the container).
+
 
 ## Quality Gates
 

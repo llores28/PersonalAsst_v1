@@ -1,0 +1,11 @@
+[
+  "tests/test_repair_flow.py::TestRepairApprovalFlow::test_execute_pending_repair_success",
+  "tests/test_repair_flow.py::TestRepairApprovalFlow::test_is_repair_approval_request_requires_explicit_repair_language",
+  "tests/test_repair_flow.py::TestRepairApprovalFlow::test_maybe_handle_pending_repair_executes_after_verification",
+  "tests/test_repair_flow.py::TestRepairApprovalFlow::test_maybe_handle_pending_repair_issues_security_challenge",
+  "tests/test_repair_flow.py::TestRepairApprovalFlow::test_maybe_handle_pending_repair_reports_missing_security_setup",
+  "tests/test_repair_flow.py::TestRepairPlanStorage::test_store_repair_plan_records_payload",
+  "tests/test_repair_flow.py::TestRepairPlanStorage::test_store_repair_plan_rejects_mismatched_patch_path",
+  "tests/test_repair_flow.py::TestRepairRepoHelpers::test_read_repo_file_returns_numbered_lines",
+  "tests/test_repair_flow.py::TestRepairRepoHelpers::test_search_repo_finds_matches"
+]

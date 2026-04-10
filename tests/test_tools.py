@@ -11,7 +11,7 @@ class TestToolManifest:
     """Test tool manifest schema validation."""
 
     def test_parse_example_manifest(self) -> None:
-        manifest_path = Path("tools/_example/manifest.json")
+        manifest_path = Path("src/tools/plugins/_example/manifest.json")
         if manifest_path.exists():
             m = ToolManifest.model_validate_json(manifest_path.read_text())
             assert m.name == "example_echo"
@@ -136,12 +136,22 @@ class TestToolFactoryAgent:
         from src.agents.tool_factory_agent import TOOL_FACTORY_INSTRUCTIONS
         assert "standalone script" in TOOL_FACTORY_INSTRUCTIONS
         assert "CLI Tool (default)" in TOOL_FACTORY_INSTRUCTIONS
-        assert "function_tool (rare)" in TOOL_FACTORY_INSTRUCTIONS
+        assert "function_tool" in TOOL_FACTORY_INSTRUCTIONS
+        assert "specialist agent" in TOOL_FACTORY_INSTRUCTIONS
+
+    def test_instructions_contain_audit_first_template_requirements(self) -> None:
+        from src.agents.tool_factory_agent import TOOL_FACTORY_INSTRUCTIONS
+        assert "AUDIT_FIRST_SPECIALIST_TEMPLATE.md" in TOOL_FACTORY_INSTRUCTIONS
+        lowered = TOOL_FACTORY_INSTRUCTIONS.lower()
+        assert "scenario matrix" in lowered
+        assert "runtime wireframe" in lowered
+        assert "audit plan" in lowered
 
     def test_instructions_contain_safety_rules(self) -> None:
         from src.agents.tool_factory_agent import TOOL_FACTORY_INSTRUCTIONS
         assert "subprocess" in TOOL_FACTORY_INSTRUCTIONS
         assert "sandbox" in TOOL_FACTORY_INSTRUCTIONS.lower()
+        assert "tests and audit checks" in TOOL_FACTORY_INSTRUCTIONS
 
 
 class TestToolRegistry:
@@ -154,5 +164,5 @@ class TestToolRegistry:
 
     def test_registry_get_nonexistent_tool(self) -> None:
         from src.tools.registry import ToolRegistry
-        reg = ToolRegistry(Path("tools"))
+        reg = ToolRegistry(Path("src/tools/plugins"))
         assert reg.get_tool("nonexistent") is None

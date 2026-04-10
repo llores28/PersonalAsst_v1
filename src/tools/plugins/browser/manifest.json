@@ -1,0 +1,19 @@
+{
+  "$schema": "tool-manifest-v1",
+  "name": "browser",
+  "version": "1.0.0",
+  "description": "Browser automation — navigate websites, fill forms, click buttons, extract content, take screenshots. Useful for interacting with sites that lack APIs (e.g. LinkedIn Easy Apply, form submissions).",
+  "type": "function",
+  "entrypoint": "tool.py",
+  "wrapper": "tool.py",
+  "parameters": {},
+  "output_format": "json",
+  "timeout_seconds": 120,
+  "requires_approval": true,
+  "requires_network": true,
+  "allowed_hosts": ["*"],
+  "credentials": {},
+  "dependencies": ["playwright>=1.40.0"],
+  "created_at": "2026-03-21T21:00:00Z",
+  "created_by": "manual"
+}

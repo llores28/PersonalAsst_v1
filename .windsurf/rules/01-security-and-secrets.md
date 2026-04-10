@@ -1,3 +1,6 @@
+---
+trigger: always_on
+---
 # Security & Secrets Policy
 
 ## Secrets Management

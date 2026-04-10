@@ -9,13 +9,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
 
-# Application code
+# Install Playwright browsers in shared path (accessible to non-root user)
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
+RUN playwright install --with-deps chromium && \
+    chmod -R o+rx /opt/playwright
+
+# Application code (plugins are inside src/tools/plugins/)
 COPY src/ ./src/
+COPY tests/ ./tests/
 COPY config/ ./config/
 COPY alembic.ini ./
-COPY tools/_example/ ./tools/_example/
+COPY pytest.ini ./
 
 # Non-root user
 RUN useradd -m -r assistant && chown -R assistant:assistant /app

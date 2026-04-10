@@ -1,7 +1,12 @@
 ---
 description: Run all quality gates before committing changes
+auto_execution_mode: 3
 ---
 
+0. Ensure dev test tooling is installed:
+   ```
+   python -m pip install -r requirements-dev.txt
+   ```
 1. Lint check:
    ```
    ruff check src/ tests/
@@ -14,8 +19,12 @@ description: Run all quality gates before committing changes
    ```
    mypy src/ --strict
    ```
-4. Run tests:
+4. During debugging, run the smallest relevant test file first:
    ```
-   pytest tests/ -v --tb=short
+   python -m pytest tests/test_orchestrator.py -v
    ```
-5. If any step fails, fix issues before committing.
+5. Run the full test suite:
+   ```
+   python -m pytest tests/ -v --tb=short
+   ```
+6. If any step fails, fix issues before committing.

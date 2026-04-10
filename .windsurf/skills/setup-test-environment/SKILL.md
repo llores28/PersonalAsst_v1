@@ -14,24 +14,26 @@ description: Set up and run the test suite for PersonalAsst
 ```bash
 python -m venv .venv
 .venv\Scripts\activate        # Windows
-pip install -r requirements.txt
-pip install pytest pytest-asyncio pytest-cov ruff mypy
+python -m pip install -r requirements-dev.txt
 ```
 
 ## Running Tests
 
 ```bash
+# Verify test discovery first
+python -m pytest tests/ --collect-only
+
+# Smallest relevant test while debugging
+python -m pytest tests/test_orchestrator.py -v
+
 # All tests
-pytest tests/ -v
+python -m pytest tests/ -v
 
 # With coverage
-pytest tests/ --cov=src --cov-report=term-missing
+python -m pytest tests/ --cov=src --cov-report=term-missing
 
 # Specific module
-pytest tests/test_orchestrator.py -v
-
-# Collect only (verify test discovery)
-pytest tests/ --collect-only
+python -m pytest tests/test_orchestrator.py -v
 ```
 
 ## Key Test Patterns

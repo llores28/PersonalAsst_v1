@@ -1,0 +1,104 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<feed xmlns='http://www.w3.org/2005/Atom' xmlns:apps='http://schemas.google.com/apps/2006'>
+  <title>Mail Filters</title>
+  <id>tag:mail.google.com,2008:filters:custom</id>
+  <updated>2026-03-19T21:32:31Z</updated>
+
+  <!-- Job Alerts & Career -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:1</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='from' value='indeed.com OR linkedin.com OR glassdoor.com OR monster.com'/>
+    <apps:property name='hasTheWord' value='job OR career OR application'/>
+    <apps:property name='label' value='Job Alerts &amp; Career'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+  <!-- E-Commerce & Deals -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:2</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='from' value='amazon.com OR ebay.com OR groupon.com OR slickdeals.net'/>
+    <apps:property name='hasTheWord' value='order OR deal OR receipt OR sale'/>
+    <apps:property name='label' value='E-Commerce &amp; Deals'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+  <!-- Tech & Webinars -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:3</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='from' value='zoom.us OR gotowebinar.com OR eventbrite.com'/>
+    <apps:property name='hasTheWord' value='webinar OR tech OR register'/>
+    <apps:property name='label' value='Tech &amp; Webinars'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+  <!-- Travel & Loyalty -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:4</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='from' value='expedia.com OR booking.com OR airbnb.com OR marriott.com OR hilton.com'/>
+    <apps:property name='hasTheWord' value='flight OR hotel OR reservation OR itinerary OR loyalty'/>
+    <apps:property name='label' value='Travel &amp; Loyalty'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+  <!-- Health & Wellness -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:5</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='from' value='fitbit.com OR myfitnesspal.com OR walgreens.com'/>
+    <apps:property name='hasTheWord' value='health OR wellness OR appointment OR rx'/>
+    <apps:property name='label' value='Health &amp; Wellness'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+  <!-- Newsletters -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:6</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='hasTheWord' value='category:social OR category:promotions OR newsletter OR subscribe OR update'/>
+    <apps:property name='label' value='Newsletters'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+  <!-- Personal & Contacts -->
+  <entry>
+    <category term='filter'></category>
+    <title>Mail Filter</title>
+    <id>tag:mail.google.com,2008:filter:7</id>
+    <updated>2026-03-19T21:32:31Z</updated>
+    <content></content>
+    <apps:property name='from' value='gmail.com OR yahoo.com OR outlook.com'/>
+    <apps:property name='hasTheWord' value='category:personal'/>
+    <apps:property name='label' value='Personal &amp; Contacts'/>
+    <apps:property name='sizeOperator' value='s_sl'/>
+    <apps:property name='sizeUnit' value='s_smb'/>
+  </entry>
+
+</feed>

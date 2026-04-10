@@ -1,8 +1,8 @@
-# Team Windsurf Bootstrap (Balanced)
+# Team Nexus Bootstrap (Balanced)
 
 You are Cascade inside Windsurf.
 
-Mission: set up a **team-grade Windsurf workspace operating system** for this repository that is practical, safe, and repeatable across contributors.
+Mission: set up a **team-grade Nexus intelligent project operating system** for this repository that is practical, safe, and repeatable across contributors.
 
 Create a middle-ground setup between "fast daily" and "strict enterprise":
 - stronger process than daily use
@@ -79,6 +79,14 @@ Create/update:
 ### 6) Memories
 Create 6-10 high-signal workspace memories.
 
+### 7) Token efficiency + cross-IDE support
+- `.windsurf/rules/00-token-efficiency.md` (always_on, quota conservation + model selection guide)
+- `bootstrap/model-selection-reference.md` (on-demand model cost database, excluded from indexing)
+- `.codeiumignore` (exclude large/generated files from indexing)
+- `.github/copilot-instructions.md` (VS Code Copilot cross-IDE support)
+- `CLAUDE.md` (Claude Code cross-IDE support)
+- `.cursorrules` (Cursor IDE cross-IDE support)
+
 ---
 
 ## Hard constraints
@@ -127,15 +135,19 @@ Create concise, operational rules:
 
 Add component-specific rules only if component boundaries are clear.
 
-### Activation guidance
-- Core rules (`00-03`) => Always On
-- Component rules (`10+`) => Glob
+### Activation guidance (token-efficient defaults)
+- `00-project-overview` => Always On (small, essential context)
+- `01-security-and-secrets` => Always On (non-negotiable)
+- `02-change-safety-and-testing` => Model Decision (loaded only when relevant)
+- `03-release-and-ops` => Model Decision (loaded only when relevant)
+- Component rules (`10+`) => Glob (loaded only when matching files touched)
+- Always create a `00-token-efficiency.md` rule (always_on) with quota conservation instructions.
 If activation metadata cannot be reliably encoded in files, provide manual mapping for:
 `Cascade → Customizations → Rules`.
 
 ---
 
-## Phase 2 — AGENTS.md hierarchy
+## Phase 2 — AGENTS.md hierarchy + cross-IDE instructions
 
 Root `AGENTS.md` must define:
 - repo navigation
@@ -143,8 +155,14 @@ Root `AGENTS.md` must define:
 - safe command execution policy
 - testing + docs update expectations
 - escalation behavior when uncertain
+- This file is recognized by both Windsurf AND VS Code Copilot.
 
 Scoped `AGENTS.md` files must contain only subtree-specific guidance and avoid duplication.
+
+Also create:
+- `.github/copilot-instructions.md`: project context, coding standards, commands (for VS Code Copilot).
+- `CLAUDE.md`: project context, constraints, commands (for Claude Code / VS Code with Claude).
+- `.cursorrules`: project context, constraints, commands (for Cursor IDE).
 
 ---
 

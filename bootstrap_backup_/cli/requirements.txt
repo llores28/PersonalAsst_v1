@@ -1,0 +1,8 @@
+# Bootstrap CLI Toolkit - Pinned Dependencies
+# Install: pip install -r requirements.txt
+
+click==8.1.7
+rich==13.9.4
+pyyaml==6.0.2
+httpx==0.27.2
+beautifulsoup4==4.12.3

@@ -1,0 +1,30 @@
+{
+  "$schema": "tool-manifest-v1",
+  "name": "linkedin",
+  "version": "1.0.0",
+  "description": "LinkedIn integration — read profile, search people/jobs, send messages, create posts",
+  "type": "function",
+  "entrypoint": "tool.py",
+  "wrapper": "tool.py",
+  "parameters": {},
+  "output_format": "json",
+  "timeout_seconds": 60,
+  "requires_approval": false,
+  "requires_network": true,
+  "allowed_hosts": ["www.linkedin.com", "api.linkedin.com"],
+  "credentials": {
+    "linkedin_email": {
+      "description": "LinkedIn account email address",
+      "required": true,
+      "env_var_hint": "LINKEDIN_EMAIL"
+    },
+    "linkedin_password": {
+      "description": "LinkedIn account password",
+      "required": true,
+      "env_var_hint": "LINKEDIN_PASSWORD"
+    }
+  },
+  "dependencies": ["linkedin-api>=2.0.0"],
+  "created_at": "2026-03-21T20:00:00Z",
+  "created_by": "manual"
+}

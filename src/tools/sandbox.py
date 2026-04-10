@@ -6,11 +6,11 @@ Resolves PRD gap C3 (sandbox isolation) and X1 (subprocess block clarification).
 import asyncio
 import logging
 import re
-import subprocess
 from pathlib import Path
 from typing import Optional
 
 from src.settings import settings
+from src.tools.credentials import build_sandbox_env, get_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,7 @@ async def run_cli_tool(
     entrypoint: str,
     args: list[str],
     timeout: Optional[int] = None,
+    credential_keys: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """Run a CLI tool in a sandboxed subprocess.
 
@@ -63,6 +64,8 @@ async def run_cli_tool(
         entrypoint: Script filename (e.g. cli.py)
         args: Command-line arguments
         timeout: Override timeout in seconds
+        credential_keys: If provided, fetch these credentials from the vault
+            and inject them as TOOL_* env vars.
 
     Returns:
         (return_code, stdout, stderr)
@@ -73,6 +76,11 @@ async def run_cli_tool(
     if not script_path.exists():
         return (1, "", f"Tool entrypoint not found: {script_path}")
 
+    # Build safe env with Python paths + vault credentials
+    tool_name = tool_dir.name
+    creds = await get_credentials(tool_name) if credential_keys else {}
+    env = build_sandbox_env(creds, allowed_keys=credential_keys)
+
     cmd = ["python", str(script_path)] + args
 
     try:
@@ -81,7 +89,7 @@ async def run_cli_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(tool_dir),
-            env={},  # Empty env — no inherited secrets (HC-1, C3)
+            env=env,
         )
 
         try:

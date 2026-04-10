@@ -1,12 +1,13 @@
 """Scheduler Agent — manages recurring tasks and reminders (as_tool per AD-3)."""
-
+  
 import logging
 import uuid
-
+  
 from agents import Agent, function_tool
-
-from src.settings import settings
-
+  
+from src.agents.persona_mode import PersonaMode, build_persona_mode_addendum
+from src.models.router import ModelRole, select_model
+  
 logger = logging.getLogger(__name__)
 
 SCHEDULER_INSTRUCTIONS = """\
@@ -14,6 +15,7 @@ You are a scheduling specialist. You help the user create, manage, and cancel re
 
 ## Capabilities
 - Create reminders at specific times or on recurring schedules
+- Create one-shot tasks or to-do items that should trigger at a specific time
 - Parse natural language time expressions into schedules
 - List all active scheduled tasks
 - Cancel or pause scheduled tasks
@@ -30,14 +32,14 @@ Convert natural language to cron parameters:
 
 ## Rules
 - Always confirm the schedule details with the user before creating.
+- Treat reminder, task, todo, and to-do requests as scheduler-managed items unless the user explicitly asks for a calendar event.
 - Show the next run time after creating a schedule.
 - When listing schedules, show ID, description, and next run time.
 - Use clear, human-readable descriptions for all jobs.
 """
 
 
-@function_tool
-async def create_reminder(
+async def _create_reminder_impl(
     description: str,
     schedule_type: str,
     user_id: int,
@@ -49,20 +51,7 @@ async def create_reminder(
     run_at: str = "",
     message: str = "",
 ) -> str:
-    """Create a scheduled reminder or recurring task.
-
-    Args:
-        description: Human-readable description of the task
-        schedule_type: "cron" for recurring, "interval" for periodic, "once" for one-shot
-        user_id: Internal user ID
-        day_of_week: Cron day(s) e.g. "mon", "mon-fri", "mon,wed,fri" (cron only)
-        hour: Hour to run (0-23, cron only)
-        minute: Minute to run (0-59, cron only)
-        interval_minutes: Minutes between runs (interval only)
-        interval_hours: Hours between runs (interval only)
-        run_at: ISO datetime for one-shot jobs (once only)
-        message: The reminder message to send
-    """
+    """Core logic for creating a scheduled reminder (plain async, not a tool)."""
     from src.scheduler.engine import add_cron_job, add_interval_job, add_one_shot_job
     from src.db.session import async_session
     from src.db.models import ScheduledTask
@@ -131,8 +120,42 @@ async def create_reminder(
 
 
 @function_tool
-async def create_morning_brief(user_id: int, hour: int = 8, minute: int = 0) -> str:
-    """Set up a daily morning brief (calendar + email summary)."""
+async def create_reminder(
+    description: str,
+    schedule_type: str,
+    user_id: int,
+    day_of_week: str = "",
+    hour: int = 9,
+    minute: int = 0,
+    interval_minutes: int = 0,
+    interval_hours: int = 0,
+    run_at: str = "",
+    message: str = "",
+) -> str:
+    """Create a scheduled reminder or recurring task.
+
+    Args:
+        description: Human-readable description of the task
+        schedule_type: "cron" for recurring, "interval" for periodic, "once" for one-shot
+        user_id: Internal user ID
+        day_of_week: Cron day(s) e.g. "mon", "mon-fri", "mon,wed,fri" (cron only)
+        hour: Hour to run (0-23, cron only)
+        minute: Minute to run (0-59, cron only)
+        interval_minutes: Minutes between runs (interval only)
+        interval_hours: Hours between runs (interval only)
+        run_at: ISO datetime for one-shot jobs (once only)
+        message: The reminder message to send
+    """
+    return await _create_reminder_impl(
+        description=description, schedule_type=schedule_type, user_id=user_id,
+        day_of_week=day_of_week, hour=hour, minute=minute,
+        interval_minutes=interval_minutes, interval_hours=interval_hours,
+        run_at=run_at, message=message,
+    )
+
+
+async def _create_morning_brief_impl(user_id: int, hour: int = 8, minute: int = 0) -> str:
+    """Core logic for morning brief creation (plain async, not a tool)."""
     from src.scheduler.engine import add_cron_job
     from src.db.session import async_session
     from src.db.models import ScheduledTask
@@ -167,8 +190,13 @@ async def create_morning_brief(user_id: int, hour: int = 8, minute: int = 0) -> 
 
 
 @function_tool
-async def list_schedules(user_id: int) -> str:
-    """List all active scheduled tasks for the user."""
+async def create_morning_brief(user_id: int, hour: int = 8, minute: int = 0) -> str:
+    """Set up a daily morning brief (calendar + email summary)."""
+    return await _create_morning_brief_impl(user_id=user_id, hour=hour, minute=minute)
+
+
+async def _list_schedules_impl(user_id: int) -> str:
+    """Core logic for listing schedules (plain async, not a tool)."""
     from sqlalchemy import select
     from src.db.session import async_session
     from src.db.models import ScheduledTask
@@ -177,7 +205,7 @@ async def list_schedules(user_id: int) -> str:
         result = await session.execute(
             select(ScheduledTask).where(
                 ScheduledTask.user_id == user_id,
-                ScheduledTask.is_active == True,
+                ScheduledTask.is_active == True,  # noqa: E712
             )
         )
         tasks = result.scalars().all()
@@ -195,8 +223,13 @@ async def list_schedules(user_id: int) -> str:
 
 
 @function_tool
-async def cancel_schedule(job_id: str, user_id: int) -> str:
-    """Cancel a scheduled task by its job ID."""
+async def list_schedules(user_id: int) -> str:
+    """List all active scheduled tasks for the user."""
+    return await _list_schedules_impl(user_id=user_id)
+
+
+async def _cancel_schedule_impl(job_id: str, user_id: int) -> str:
+    """Core logic for cancelling a schedule (plain async, not a tool)."""
     from src.scheduler.engine import remove_job
     from sqlalchemy import update
     from src.db.session import async_session
@@ -220,11 +253,86 @@ async def cancel_schedule(job_id: str, user_id: int) -> str:
     return f"Schedule `{job_id}` removed from DB (may not have been active in scheduler)."
 
 
-def create_scheduler_agent() -> Agent:
+@function_tool
+async def cancel_schedule(job_id: str, user_id: int) -> str:
+    """Cancel a scheduled task by its job ID."""
+    return await _cancel_schedule_impl(job_id=job_id, user_id=user_id)
+
+
+def _build_bound_scheduler_tools(bound_user_id: int) -> list:
+    @function_tool(name_override="create_my_reminder")
+    async def create_my_reminder(
+        description: str,
+        schedule_type: str,
+        day_of_week: str = "",
+        hour: int = 9,
+        minute: int = 0,
+        interval_minutes: int = 0,
+        interval_hours: int = 0,
+        run_at: str = "",
+        message: str = "",
+    ) -> str:
+        """Create a scheduled reminder or recurring task.
+
+        Args:
+            description: Human-readable description of the task
+            schedule_type: "cron" for recurring, "interval" for periodic, "once" for one-shot
+            day_of_week: Cron day(s) e.g. "mon", "mon-fri", "mon,wed,fri" (cron only)
+            hour: Hour to run (0-23, cron only)
+            minute: Minute to run (0-59, cron only)
+            interval_minutes: Minutes between runs (interval only)
+            interval_hours: Hours between runs (interval only)
+            run_at: ISO datetime for one-shot jobs (once only)
+            message: The reminder message to send
+        """
+        return await _create_reminder_impl(
+            description=description,
+            schedule_type=schedule_type,
+            user_id=bound_user_id,
+            day_of_week=day_of_week,
+            hour=hour,
+            minute=minute,
+            interval_minutes=interval_minutes,
+            interval_hours=interval_hours,
+            run_at=run_at,
+            message=message,
+        )
+
+    @function_tool(name_override="create_my_morning_brief")
+    async def create_my_morning_brief(hour: int = 8, minute: int = 0) -> str:
+        """Set up a daily morning brief (calendar + email summary)."""
+        return await _create_morning_brief_impl(user_id=bound_user_id, hour=hour, minute=minute)
+
+    @function_tool(name_override="list_my_schedules")
+    async def list_my_schedules() -> str:
+        """List all active scheduled tasks for the user."""
+        return await _list_schedules_impl(user_id=bound_user_id)
+
+    @function_tool(name_override="cancel_my_schedule")
+    async def cancel_my_schedule(job_id: str) -> str:
+        """Cancel a scheduled task by its job ID."""
+        return await _cancel_schedule_impl(job_id=job_id, user_id=bound_user_id)
+
+    return [create_my_reminder, create_my_morning_brief, list_my_schedules, cancel_my_schedule]
+
+
+def create_scheduler_agent(mode: PersonaMode = "scheduler", bound_user_id: int | None = None) -> Agent:
     """Create the scheduler specialist agent."""
+    instructions = f"{SCHEDULER_INSTRUCTIONS}\n\n{build_persona_mode_addendum(mode)}"
+    tools = [create_reminder, create_morning_brief, list_schedules, cancel_schedule]
+    if bound_user_id is not None:
+        instructions = (
+            f"{instructions}\n\n"
+            "## Bound User Context\n"
+            f"The current internal scheduler user id is `{bound_user_id}`. "
+            "Prefer the bound tools `create_my_reminder`, `create_my_morning_brief`, `list_my_schedules`, and `cancel_my_schedule`. "
+            "Do not ask the user for their user id and do not attempt to guess it."
+        )
+        tools = _build_bound_scheduler_tools(bound_user_id)
+    selection = select_model(ModelRole.GENERAL)
     return Agent(
         name="SchedulerAgent",
-        instructions=SCHEDULER_INSTRUCTIONS,
-        model=settings.model_general,
-        tools=[create_reminder, create_morning_brief, list_schedules, cancel_schedule],
+        instructions=instructions,
+        model=selection.model_id,
+        tools=tools,
     )

@@ -1,0 +1,6 @@
+# Prevent Windsurf from indexing large reference docs (read on-demand by rules/workflows)
+bootstrap/wizard-reference.md
+bootstrap/model-selection-reference.md
+
+# Cache directories
+.cache/
