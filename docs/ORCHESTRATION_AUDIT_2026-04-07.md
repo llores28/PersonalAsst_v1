@@ -1,5 +1,9 @@
 # Orchestration Module Deep Audit — 2026-04-07
 
+> Update (2026-04-11): High-priority reliability/security items from this audit were implemented in Phase 1/2 hardening.
+> - Completed: scheduler one-shot DB sync contract fix, startup migration gate, org ownership checks, durable org delete audit trail, CORS hardening, and critical silent-exception logging improvements.
+> - Remaining items in this report should be treated as backlog unless superseded by newer ADRs/tests.
+
 ## Summary
 23 gaps found across backend, frontend, Docker, and security layers.
 **6 FATAL** (will crash at runtime), **6 CRITICAL** (wrong behavior), **6 MODERATE**, **5 LOW**.

@@ -1,0 +1,59 @@
+# Version control
+.git/
+.github/
+
+# Secrets (never bake into image)
+.env
+.env.local
+
+# Python runtime artifacts
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# IDE / OS metadata
+.vscode/
+.idea/
+.windsurf/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Bootstrap dev tooling (not needed in image)
+bootstrap/
+bootstrap-backup*/
+bootstrap_backup*/
+
+# Documentation (not needed in image)
+docs/
+*.md
+!README.md
+
+# Frontend — built separately via orchestration-ui Dockerfile
+orchestration-ui/
+
+# Test suite (not needed in production image)
+tests/
+
+# Temp / cache
+.tmp/
+.benchmarks/
+.cache/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Personal data
+gmail-filters.xml
+
+# Logs
+*.log
+
+# Scripts (dev helpers, not needed in image)
+scripts/

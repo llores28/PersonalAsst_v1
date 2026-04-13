@@ -56,12 +56,26 @@ def build_organization_skill(user_id: int) -> SkillDefinition:
         instructions=(
             "Use organization tools when the user wants to manage project teams, agent organizations, "
             "tracked tasks, org-scoped schedules, or create tools within an organization.\n\n"
-            "**CRUD:**\n"
+            "**GOAL-BASED PROJECT SETUP (most important):**\n"
+            "When the user describes a high-level goal such as 'create an auditor for Atlas', "
+            "'set up a team to monitor my emails', or 'build a project to improve my assistant', "
+            "use `setup_org_project` FIRST. This single tool will:\n"
+            "  1. Generate a structured plan (agents, skills, tasks) using the LLM.\n"
+            "  2. Create the organization automatically.\n"
+            "  3. Add all agents with their skills and allowed tools.\n"
+            "  4. Create and assign all tasks in one shot.\n"
+            "Do NOT manually call create_organization + add_org_agent + add_org_task for these "
+            "goal-based requests — use setup_org_project instead.\n\n"
+            "When the user names an organization but does not provide a numeric org ID, first use "
+            "`find_organization` or `list_organizations` to resolve the correct org before mutating tasks, agents, schedules, or tools. "
+            "Do not guess org IDs.\n\n"
+            "**CRUD (for manual management):**\n"
             "- `list_organizations` — show all orgs the user owns\n"
+            "- `find_organization` — resolve an org by name and return the correct org ID\n"
             "- `create_organization` — create a new project/mission container\n"
             "- `update_organization` — change name, goal, description, or status\n"
             "- `get_organization_status` — detailed view with agents and tasks\n"
-            "- `add_org_agent` — add a specialized agent to an org\n"
+            "- `add_org_agent` — add a specialized agent with skills and allowed_tools to an org\n"
             "- `add_org_task` — create a tracked task in an org\n"
             "- `assign_org_task` — assign/reassign a task to an agent\n"
             "- `complete_org_task` — mark a task as done\n"
@@ -76,8 +90,9 @@ def build_organization_skill(user_id: int) -> SkillDefinition:
             "tracked in the Atlas Dashboard. For Google Tasks, use the Google Tasks skill."
         ),
         routing_hints=[
+            "Goal-based project setup: 'create a project to', 'set up a team for', 'create an auditor', 'build a workflow to', 'set up agents to'",
             "Organizations: 'create an organization', 'my organizations', 'org status', 'update org'",
-            "Org agents: 'add an agent to', 'team members', 'specialist agent'",
+            "Org agents: 'add an agent to', 'team members', 'specialist agent', 'agent with skills'",
             "Org tasks: 'add a task to org', 'complete task', 'org tasks', 'project tasks', 'assign task'",
             "Org scheduling: 'schedule for org', 'org cron', 'recurring org task', 'org reminder'",
             "Org tools: 'create a tool for org', 'org cli tool', 'build tool for project'",
@@ -107,7 +122,8 @@ def build_scheduler_skill(user_id: int) -> SkillDefinition:
             "'every Monday at 9am' → cron day_of_week=mon hour=9; "
             "'every 30 minutes' → interval minutes=30; "
             "'tomorrow at 3pm' → once run_at=<ISO datetime>. "
-            "Confirm schedule details before creating. "
+            "If the request already clearly specifies the schedule, create it directly and then summarize. "
+            "If details are ambiguous, propose a sensible default once and proceed when the user replies briefly (e.g., 'confirm'). "
             "For Google Calendar events, use calendar skill tools instead."
         ),
         routing_hints=[

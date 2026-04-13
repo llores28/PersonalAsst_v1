@@ -1,5 +1,7 @@
 # PersonalAsst - Enhanced with PaperClip-Inspired Orchestration
 
+> Note: This document provides orchestration context. For the latest production-ready hardening, security, and operations updates, refer to `README.md`, `docs/RUNBOOK.md`, and `docs/CHANGELOG.md`.
+
 ## Overview
 
 PersonalAsst has been enhanced with PaperClip-inspired agent orchestration capabilities, transforming it from a single-user assistant into a multi-agent orchestration platform while maintaining its security-first Docker deployment model.
@@ -85,10 +87,10 @@ Services started:
 #### Telegram Bot (Existing)
 - Continue using your existing Telegram bot
 - All current commands work unchanged
-- New orchestration features available via `/orchestrate` command
+- Organization lifecycle is available via `/orgs` (`create`, `info`, `pause`, `resume`, `delete`)
 
 #### Web Dashboard (New)
-- Open http://localhost:3000
+- Open http://localhost:3001
 - View agent org chart
 - Create and manage tasks
 - Monitor costs and performance

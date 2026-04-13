@@ -21,6 +21,7 @@ RUN playwright install --with-deps chromium && \
 COPY src/ ./src/
 COPY tests/ ./tests/
 COPY config/ ./config/
+COPY alembic/ ./alembic/
 COPY alembic.ini ./
 COPY pytest.ini ./
 

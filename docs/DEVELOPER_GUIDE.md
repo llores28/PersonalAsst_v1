@@ -13,8 +13,10 @@ Telegram Bot (aiogram 3.x)
       ├── 8 Google Workspace Skills (45 direct tools, zero agent wrappers)
       ├── 2 Internal Skills (Memory: 7 tools, Scheduler: 4 tools)
       ├── Web Search (OpenAI WebSearchTool)
+      ├── Parallel Runner (asyncio.gather fan-out — M1)
+      ├── Background Job runner (autonomous monitor jobs — M2)
       ├── Tool Factory Agent (Handoff — CLI tool generation)
-      ├── Repair Agent (Handoff — read-only diagnostics + repair plans)
+      ├── Repair Agent (Handoff — risk classify, auto-apply, smoke test — M4)
       ├── Safety Agent (input injection + context-aware PII guardrails)
       ├── Reflector Agent (background quality scoring)
       └── Curator Agent (weekly self-improvement)
@@ -51,6 +53,12 @@ docker compose exec assistant alembic upgrade head
 # 4. Test — send /start to your Telegram bot
 ```
 
+### Startup migration behavior
+
+- `run_migrations()` is gated by `STARTUP_MIGRATIONS_ENABLED`.
+- Default is disabled (`false`) for safer startup behavior.
+- Recommended: run migrations explicitly in ops flow (`alembic upgrade head`).
+
 ## Project Structure
 
 ```
@@ -58,9 +66,12 @@ src/
 ├── main.py                     # Entry point
 ├── settings.py                 # Pydantic Settings (from .env)
 ├── bot/                        # Telegram handlers, voice transcription
-├── agents/                     # 14 agent definitions (OpenAI Agents SDK)
+├── agents/                     # 19 agent / runner files (OpenAI Agents SDK)
 │   ├── orchestrator.py         # Office organizer + complexity routing + SDK RedisSession
 │   ├── persona_mode.py         # Persona template + runtime datetime injection
+│   ├── routing_hardened.py     # TaskDomain/Intent enums + detect_parallel_domains() [M1]
+│   ├── parallel_runner.py      # asyncio.gather fan-out, max 3 branches, budget guard [M1]
+│   ├── background_job.py       # BackgroundJob lifecycle, tick loop, APScheduler, notify [M2]
 │   ├── email_agent.py          # Gmail — 6 direct connected tools
 │   ├── calendar_agent.py       # Calendar — 2 direct connected tools
 │   ├── tasks_agent.py          # Tasks — 4 direct connected tools
@@ -74,17 +85,19 @@ src/
 │   ├── tool_factory_agent.py   # Dynamic tool creation (Handoff)
 │   ├── reflector_agent.py      # Quality scoring (ACE pattern)
 │   ├── curator_agent.py        # Weekly self-improvement (ACE)
-│   ├── repair_agent.py         # Diagnostic agent (Handoff, read-only)
+│   ├── repair_agent.py         # Risk classify + auto-apply low-risk + propose_low_risk_fix [M4]
 │   ├── persona_interview_agent.py # 3-session personality profiling interview
 │   └── safety_agent.py         # Input/output guardrails
 ├── skills/                     # Unified skill registry (10 skills)
+├── repair/                     # engine.py (classify_repair_risk), verifier.py [M4]
 ├── memory/                     # Mem0 (dedup + access tracking), Redis, persona
 ├── models/                     # Model catalog + complexity-aware routing
 ├── tools/                      # Tool registry, sandbox, manifest, credential vault
 ├── scheduler/                  # APScheduler 4.x engine + job callables
 ├── security/                   # Owner challenge gate (PIN/security Q)
 ├── integrations/               # Google Workspace MCP client
-└── db/                         # SQLAlchemy models + Alembic migrations
+├── orchestration/              # FastAPI Dashboard API — includes /api/traces, /api/repairs, /api/background-jobs
+└── db/                         # SQLAlchemy models + Alembic migrations (006: agent_traces, background_jobs)
 config/                         # Persona, safety policies, tool tiers (YAML)
 tools/                          # Dynamic tools (Docker volume, hot-reloaded)
 ├── _example/                   # Example CLI tool template
@@ -112,9 +125,19 @@ See `.env.example` for the complete list. Required:
 - `OWNER_TELEGRAM_ID`
 - `DB_PASSWORD`
 
+Important optional safety settings:
+- `STARTUP_MIGRATIONS_ENABLED` — enable/disable startup Alembic execution
+- `CORS_ALLOWED_ORIGINS` — comma-separated dashboard origins for orchestration API CORS
+- `AUTO_REPAIR_LOW_RISK` — `true` (default) auto-applies low-risk operational repair fixes without owner approval
+
 ## Database
 
-PostgreSQL 17 with 7 tables. Schema defined in `src/db/models.py`, managed by Alembic.
+PostgreSQL 17 with 9 tables (added `agent_traces` and `background_jobs` in migration 006). Schema defined in `src/db/models.py`, managed by Alembic.
+
+**New tables (migration 006):**
+- `agent_traces` — one row per tool-call step per `Runner.run()` (session_key, agent_name, tool_name, tool_args, tool_result_preview, step_index, duration_ms, timestamp)
+- `background_jobs` — autonomous job records (goal, status, iterations_run, max_iterations, done_condition, result, created_at)
+- Added `risk_level` + `auto_applied` columns on `repair_tickets`
 
 ```bash
 # Apply migrations
@@ -181,22 +204,25 @@ Dynamic tools that need API keys or passwords use the Redis-backed credential va
 - **Function tools:** Use `get_credentials(tool_name)` directly
 - **Security:** Credentials never logged, never returned in tool output
 
-## Repair Flow
+## Repair Flow (M4)
 
-- The `RepairAgent` can inspect the repo read-only, run allowlisted diagnostics, and record a pending repair plan.
-- Pending repair plans are stored in Redis and require the owner to say `apply patch`.
-- Applying a repair triggers the existing security challenge gate before the system runs `git apply` and the recorded validation commands.
+- `classify_repair_risk(plan)` in `src/repair/engine.py` returns `low | medium | high`.
+- **Low-risk** (Redis clears, schedule re-injections, env-var logging): auto-applied immediately via `propose_low_risk_fix` tool on the RepairAgent. No owner approval needed. Respects `AUTO_REPAIR_LOW_RISK=false` to disable.
+- **Medium/High**: stored in Redis as pending plan, require owner to say `apply patch`, then trigger security challenge gate.
+- After apply: `verify_repair()` in `src/repair/verifier.py` runs `pytest -x -q` smoke test. On failure, `rollback_repair()` reverses the applied changes.
+- `risk_level` and `auto_applied` fields on `RepairTicket` record the outcome.
 
 ## Docker Services
 
 | Service | Port | Purpose |
 |---------|------|---------|
-| assistant | — | Main application (no exposed port) |
-| workspace-mcp | 8081 (internal) | Google Workspace MCP Server |
+| assistant | — | Main application: bot, agents, scheduler |
+| orchestration-api | 8000 | FastAPI Dashboard API |
+| orchestration-ui | 3001 | React Dashboard UI |
+| workspace-mcp | 8083 (host-mapped) | Google Workspace MCP Server |
 | postgres | 5432 (internal) | Database + APScheduler job store |
 | qdrant | 6333 (internal) | Vector store (Mem0) |
 | redis | 6379 (internal) | Cache + conv sessions + SDK agent sessions |
-| watchtower | — | Auto-update (optional) |
 
 ## Key Patterns
 
@@ -213,6 +239,34 @@ This prevents the `FunctionTool object is not callable` error. See `scheduler_ag
 
 ### SDK Session Management
 The orchestrator uses `RedisSession` (`agent_session:{telegram_id}`) for LLM conversation memory. Session history is filtered to exclude `function_call`/`function_call_output` items from previous runs to prevent stale-session 400 errors. Bot handlers include catch-and-retry for `BadRequestError` with automatic session clearing.
+
+### Organization ownership and auditability
+
+- Dashboard org endpoints resolve request user from `X-Telegram-Id` (with owner fallback for single-user mode) and enforce owned-org access.
+- Telegram `/orgs` and dashboard org flows log lifecycle actions to `OrgActivity`.
+- Destructive delete actions also log durable entries to `audit_log` before cascading org deletion.
+
+## April 2026 Hardening Snapshot
+
+- Scheduler: one-shot DB sync now normalizes `run_at` to ISO string before scheduling.
+- Startup: migration execution is explicit and gated.
+- Bot reliability: critical routing fallback paths log structured warnings instead of silent exception swallowing.
+- API security: dashboard CORS moved to env-driven allowlist with wildcard suppression.
+- Tests: added focused regression tests for scheduler sync, migration gating, org auth/delete audit trail, CORS parsing, and `/orgs` Telegram handlers.
+
+## Agentic Upgrade Patterns (April 12, 2026)
+
+### Parallel Fan-Out (M1)
+Call `detect_parallel_domains(message)` — returns a list of `{domain, prompt}` dicts if ≥ 2 domains with ≥ 0.7 confidence are detected. Pass to `run_parallel_tasks(domains, user_id, budget_used)`. Falls back to sequential if budget guard fires (spend ≥ 80% daily cap).
+
+### Background Jobs (M2)
+Call `is_background_job_request(message)` — returns `True` for "monitor / watch / keep an eye on / alert me when" phrasing. Call `create_background_job(goal, user_id, telegram_id)` to create and schedule the tick loop. Jobs self-terminate after `max_iterations` (default 144 = 24h at 10-min ticks) or 3 consecutive faults.
+
+### Trace Persistence (M3)
+After every `Runner.run()` call, extract `result.new_items` and pair `FunctionCallItem` + `FunctionCallOutputItem` items. Persist each pair as an `AgentTrace` row with `session_key = f"agent_session:{telegram_id}"`. Query via `GET /api/traces?session_key=...`.
+
+### Risk-Classified Repair (M4)
+In `RepairAgent`, call `classify_repair_risk(plan)` before deciding approval path. `propose_low_risk_fix` tool auto-applies immediately (no gate) and sets `auto_applied=True` on the RepairTicket. After apply, `verify_repair()` runs smoke test; on failure, `rollback_repair()` reverses changes.
 
 ### Persona Interview Onboarding (AD-7)
 Based on Stanford's "Generative Agent Simulations" research (2024) and Cambridge/DeepMind's psychometric framework (2025). A dedicated `PersonaInterviewAgent` conducts a structured 3-session conversational interview via Telegram:

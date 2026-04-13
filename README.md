@@ -14,18 +14,41 @@ A self-improving, multi-agent Personal Assistant that runs in Docker and talks t
 - **Digital Clone Onboarding** — Structured 3-session conversational interview builds a deep personality profile (OCEAN scores, communication style, work context, values). Based on Stanford/DeepMind research.
 - **Dynamic Tool Creation** — Ask it to build a new CLI tool and it generates, tests, and registers it automatically.
 - **Task Scheduling** — "Remind me every Monday at 9am" or "Remind me today at 3pm" — recurring and one-shot jobs with natural language.
+- **Organization Management** — Manage organizations from Dashboard and Telegram (`/orgs create|info|pause|resume|delete`).
 - **AI-Guided Skill Creation** — Create custom skills via Telegram interview or Dashboard editor. Skills use declarative SKILL.md format with routing hints for natural language matching.
 - **Filesystem-Based Skills** — Drop a SKILL.md file in `user_skills/` and hot-reload without restart. Version controlled, portable, shareable.
 - **Safe by Design** — Context-aware input/output guardrails, sandboxed tool execution, cost caps, user allowlist.
-- **Self-Healing Diagnostics** — Repair agent inspects the repo read-only, generates repair plans, and can apply approved patches after security verification.
+- **Self-Healing Diagnostics** — Repair agent inspects the repo read-only, generates repair plans, auto-applies low-risk operational fixes, and can apply approved patches after security verification with smoke test + rollback.
+- **Explainable Observability** — Every agent tool call is persisted as a trace step. Dashboard Timeline drawer shows full step-by-step agent thought trace per interaction.
+- **Parallel Multi-Agent Execution** — Multi-domain requests (e.g., "Email Sarah AND schedule a meeting AND update the doc") fan out to 3 parallel agent branches simultaneously.
+- **Autonomous Background Jobs** — Say "Monitor my inbox until I get a reply from John" and Atlas creates a persistent background job with tick loop, fault tolerance, and Telegram notification when done.
 - **Stale Session Recovery** — Automatic detection and clearing of corrupt SDK sessions with transparent retry.
 - **Fully Self-Hosted** — All databases run in Docker. Zero SaaS calls for data storage.
+
+## Latest Updates (2026-04-12) — Agentic Upgrade M1–M4
+
+- **M3 Explainable Observability** — `AgentTrace` table; every tool call step persisted; Dashboard Timeline drawer in Activity tab
+- **M4 Self-Healing Loop** — `classify_repair_risk()`, auto-apply for low-risk fixes, `verifier.py` smoke + rollback; Repairs tab with risk/status badges
+- **M1 Parallel Fan-Out** — `parallel_runner.py` with `asyncio.gather`; detects multi-domain requests and fans out up to 3 branches; budget-aware fallback
+- **M2 Background Jobs** — `background_job.py`; `BackgroundJob` model; orchestrator detects monitor/watch phrases; Jobs Dashboard tab with progress + cancel
+- **Repo Cleanup** — 4 backup dirs removed; `.gitignore`/`.dockerignore` hardened; Dockerfile alembic fix; `.windsurf`/`bootstrap` removed from git tracking
+
+### Previous Reliability & Security Updates (2026-04-11)
+
+- Fixed one-shot scheduler DB sync contract mismatch (`run_at` normalized as ISO string)
+- Added startup migration safety gate via `STARTUP_MIGRATIONS_ENABLED` (default: disabled)
+- Enforced org ownership checks on dashboard API org endpoints
+- Added durable org delete audit logs (Dashboard API + Telegram `/orgs delete`)
+- Replaced critical silent exception-swallowing paths with structured fallback logging
+- Hardened dashboard CORS to env-driven allowlist (`CORS_ALLOWED_ORIGINS`) and blocked wildcard defaults
 
 ## Architecture
 
 ```
 Telegram Bot (aiogram 3.x)
   → Orchestrator (Office Organizer — dynamic complexity routing)
+    ├── Parallel Runner     (asyncio.gather fan-out — up to 3 domains simultaneously)
+    ├── Background Job      (autonomous monitor/watch jobs with tick loop + Telegram notify)
     ├── 8 Google Workspace Skills (45 direct tools, zero agent wrappers)
     │   ├── Gmail           (6 tools — read, search, draft, send, reply, filter)
     │   ├── Calendar        (2 tools — get events, manage events)
@@ -42,7 +65,7 @@ Telegram Bot (aiogram 3.x)
     ├── Skill Factory Agent   (AI-guided skill creation via interview)
     ├── Tool Factory Agent  (Handoff — generates CLI tools on demand)
     ├── Persona Interview   (Structured 3-session personality profiling)
-    ├── Repair Agent        (Handoff — read-only diagnostics, no codebase access)
+    ├── Repair Agent        (Handoff — risk classification, auto-apply low-risk, smoke test + rollback)
     ├── Reflector Agent     (background quality scoring + trend tracking)
     ├── Curator Agent       (weekly self-improvement)
     └── Safety Agent        (input injection + output PII guardrails)
@@ -105,13 +128,18 @@ cp .env.example .env
 #   DB_PASSWORD           (any random string)
 #   GOOGLE_OAUTH_CLIENT_ID    (from Google Cloud Console)
 #   GOOGLE_OAUTH_CLIENT_SECRET (from Google Cloud Console)
+#   STARTUP_MIGRATIONS_ENABLED (true/false, default false)
+#   CORS_ALLOWED_ORIGINS       (comma-separated dashboard origins)
+#   AUTO_REPAIR_LOW_RISK       (true/false — auto-apply low-risk repair fixes, default true)
 
 # 3. Build & Start
 docker compose build
 docker compose up -d
 
 # 3-a. Rebuild
-docker compose down & docker compose build & docker compose up -d
+docker compose down --remove-orphans
+docker compose build
+docker compose up -d
 
 # 4. Connect Google Workspace
 # In Telegram: /connect google
@@ -134,6 +162,7 @@ docker compose down & docker compose build & docker compose up -d
 | `/forget <topic>` | Delete memories matching a topic |
 | `/tools` | List registered tools |
 | `/schedules` | List active scheduled tasks |
+| `/orgs` | Manage organizations: list/create/info/pause/resume/delete |
 | `/skills` | Manage skills: list, create (AI-guided), delete, reload |
 | `/stats` | Usage dashboard (cost, requests, tools, memory) |
 | `/cancel <id>` | Cancel a scheduled task |
@@ -168,9 +197,12 @@ src/
 ├── main.py                     # Entry point
 ├── settings.py                 # Config from .env (Pydantic)
 ├── bot/                        # Telegram handlers, voice transcription
-├── agents/                     # 14 agent definitions
+├── agents/                     # 19 agent / runner files
 │   ├── orchestrator.py         # Office organizer + complexity routing
 │   ├── persona_mode.py         # Persona template + prompt assembly (canonical)
+│   ├── routing_hardened.py     # TaskDomain/Intent enums + parallel domain detection
+│   ├── parallel_runner.py      # asyncio.gather fan-out (max 3, budget-aware) [M1]
+│   ├── background_job.py       # Autonomous background job lifecycle [M2]
 │   ├── email_agent.py          # Gmail — 6 direct connected tools
 │   ├── calendar_agent.py       # Calendar — 2 direct connected tools
 │   ├── tasks_agent.py          # Tasks — 4 direct connected tools
@@ -184,7 +216,7 @@ src/
 │   ├── tool_factory_agent.py   # Dynamic tool creation (Handoff)
 │   ├── reflector_agent.py      # Quality scoring + score tracking (ACE)
 │   ├── curator_agent.py        # Weekly self-improvement (ACE)
-│   ├── repair_agent.py         # Self-healing (Handoff, read-only)
+│   ├── repair_agent.py         # Self-healing — risk classify, auto-apply, smoke test [M4]
 │   ├── persona_interview_agent.py # Structured 3-session personality interview
 │   └── safety_agent.py         # Input/output guardrails
 ├── skills/                     # Unified skill registry (10 built-in + dynamic)
@@ -199,12 +231,14 @@ src/
 │   ├── skill_factory_agent.py  # AI-guided skill creation (interview → SKILL.md)
 │   └── ...
 ├── user_skills/                # User-created filesystem skills (hot-reloaded)
+├── repair/                     # Repair engine, risk classifier, verifier + rollback [M4]
 ├── memory/                     # Mem0 (dedup + access tracking), Redis, persona
 ├── models/                     # Model catalog + complexity-aware routing
 ├── tools/                      # Tool registry, sandbox, manifest schema
 ├── scheduler/                  # APScheduler engine, job callables, backup
 ├── integrations/               # Google Workspace MCP client
-└── db/                         # SQLAlchemy models, Alembic migrations
+├── orchestration/              # FastAPI Dashboard API (+ /api/traces, /api/repairs, /api/background-jobs)
+└── db/                         # SQLAlchemy models, Alembic migrations (006 adds agent_traces + background_jobs)
 config/                         # Persona, safety policies, tool tiers (YAML)
 tools/                          # Dynamic CLI tools (hot-reloaded)
 tests/                          # 20 test files, 493+ test cases
@@ -220,6 +254,10 @@ docs/                           # Developer guide, runbook, user guide, PRD, ADR
 - **Context-aware PII guardrails** — Output guardrail receives user message via `Runner.run(context={...})`. Two-layer check: (1) context-aware email allowance, (2) output-marker fallback. Prevents false positives when user explicitly requests email operations.
 - **Prompt cache optimization** — Static content (skills, rules, routing) placed first in the system prompt; dynamic content (user identity, datetime, connected email) placed last. Maximizes OpenAI prompt caching (research: 41-80% cost reduction).
 - **Dynamic complexity routing** — Lightweight heuristic classifier routes simple reads to cheaper models (nano/mini) and complex multi-step requests to more capable models (standard/pro). No LLM call for classification.
+- **Parallel multi-agent fan-out** — `detect_parallel_domains()` identifies multi-domain conjunctions (e.g., "email AND calendar AND doc") and fans out to up to 3 async agent branches simultaneously via `asyncio.gather`. Falls back to sequential if daily spend ≥ 80%.
+- **Autonomous background jobs** — Orchestrator detects "monitor/watch/alert me when" phrases and creates a `BackgroundJob` with APScheduler tick loop, fault counter (max 3 faults), iteration cap, and Telegram notification on completion/failure.
+- **Repair risk classification** — `classify_repair_risk()` scores repair plans as `low | medium | high`. Low-risk ops (Redis clears, schedule re-injections, env-var logging) are auto-applied immediately. Medium/high require owner approval.
+- **Explainable trace steps** — Every `FunctionCallItem` from `Runner.run()` is persisted to `agent_traces` with tool name, args, result preview, duration, and session key. Queryable via `GET /api/traces`.
 - **Memory deduplication** — Before storing, checks for semantically similar memories (>0.85 cosine) and updates the existing entry instead of creating duplicates. Access-count tracking informs the curator’s pruning decisions.
 - **Unified STM/LTM** — Memory tools include both long-term operations (recall/store/forget) and short-term session operations (summarize conversation, get recent context).
 - **Quality score tracking** — Reflector records quality scores per user in Redis. Trend degradation alerts when average drops below 0.5 over 5 interactions.
@@ -248,9 +286,10 @@ docs/                           # Developer guide, runbook, user guide, PRD, ADR
 - [`docs/RUNBOOK.md`](docs/RUNBOOK.md) — Operations, troubleshooting, monitoring
 - [`docs/PRD.md`](docs/PRD.md) — Product requirements with acceptance criteria
 - [`docs/HANDOFF.md`](docs/HANDOFF.md) — Current status, completed phases, pending work
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — Release history and recent fixes/upgrades
 - [`PRD_PersonalAssistant.md`](PRD_PersonalAssistant.md) — Detailed build spec (schemas, decisions)
 - [`RESEARCH_PersonalAssistant.md`](RESEARCH_PersonalAssistant.md) — Deep research report
-- `docs/ADR-*.md` — 13 Architecture Decision Records documenting key choices and fixes
+- `docs/ADR-*.md` — Architecture Decision Records documenting key choices and fixes
 
 ## License
 

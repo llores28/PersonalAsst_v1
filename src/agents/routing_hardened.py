@@ -36,6 +36,7 @@ class TaskIntent(Enum):
     ANALYZE = "analyze"  # Summarize, compare, evaluate
     DEBUG = "debug"  # Fix, troubleshoot, repair
     CONVERSE = "converse"  # Chat, clarification
+    PARALLEL = "parallel"  # Multi-domain: spawn parallel agents
 
 
 @dataclass
@@ -47,6 +48,66 @@ class RoutingSignal:
     complexity_score: float
     tool_requirements: Set[str]
     keywords: Set[str]
+
+
+_PARALLEL_CONJUNCTIONS = (
+    " and ",
+    " also ",
+    " as well as ",
+    " plus ",
+    " additionally ",
+    " then ",
+    " while ",
+    " at the same time ",
+    " simultaneously ",
+)
+
+_PARALLEL_DOMAIN_KEYWORDS: dict[str, set[str]] = {
+    "gmail": {"email", "gmail", "inbox", "mail", "unread", "message"},
+    "calendar": {"calendar", "schedule", "event", "meeting", "appointment", "when"},
+    "drive": {"drive", "file", "folder", "document", "doc", "sheet", "slides"},
+    "tasks": {"task", "todo", "to-do", "to do", "checklist"},
+    "memory": {"remember", "memory", "note", "remind", "store"},
+    "scheduler": {"schedule", "job", "scheduled", "recurring", "run every"},
+}
+_PARALLEL_CONFIDENCE_THRESHOLD = 0.70
+_PARALLEL_MIN_DOMAINS = 2
+
+
+def detect_parallel_domains(message: str) -> list[dict[str, str]] | None:
+    """Detect whether a message requests independent tasks across multiple domains.
+
+    Returns a list of {domain, prompt} dicts if ≥ PARALLEL_MIN_DOMAINS independent
+    domains are detected AND a conjunction keyword is present — otherwise None.
+
+    The caller should only use parallel execution when this returns a non-None value.
+    """
+    lowered = message.lower()
+
+    has_conjunction = any(c in lowered for c in _PARALLEL_CONJUNCTIONS)
+    if not has_conjunction:
+        return None
+
+    matched: list[str] = []
+    for domain, keywords in _PARALLEL_DOMAIN_KEYWORDS.items():
+        if any(kw in lowered for kw in keywords):
+            matched.append(domain)
+
+    if len(matched) < _PARALLEL_MIN_DOMAINS:
+        return None
+
+    import re as _re
+    parts = [p.strip() for p in _re.split(r"\band\b|\balso\b|\bplus\b", lowered, flags=_re.I) if p.strip()]
+    if len(parts) < 2:
+        return None
+
+    results: list[dict[str, str]] = []
+    for domain in matched[:3]:
+        keywords = _PARALLEL_DOMAIN_KEYWORDS[domain]
+        best_part = next((p for p in parts if any(kw in p for kw in keywords)), message)
+        results.append({"domain": domain, "prompt": best_part.strip()})
+
+    return results if len(results) >= _PARALLEL_MIN_DOMAINS else None
 
 
 class HardenedClassifier:

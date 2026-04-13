@@ -4,7 +4,7 @@ Jobs persist across container restarts (PRD §12).
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Callable
 
 from apscheduler import AsyncScheduler
 from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
@@ -13,6 +13,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 
 from src.settings import settings
+import importlib
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,13 @@ async def start_scheduler() -> None:
     except Exception as e:
         logger.warning("Could not add sync job: %s", e)
 
-    logger.info("Scheduler started")
+    # Ensure the scheduler actually runs jobs
+    try:
+        await scheduler.start_in_background()
+        logger.info("Scheduler started (background loop running)")
+    except Exception as e:
+        logger.error("Failed to start scheduler background loop: %s", e)
+        raise
 
 
 async def stop_scheduler() -> None:
@@ -66,8 +73,22 @@ async def stop_scheduler() -> None:
         logger.info("Scheduler stopped")
 
 
+def _resolve_callable(func_path_or_callable: str | Callable) -> Callable:
+    """Resolve a dotted path like 'pkg.mod:func' to a callable; pass through callables."""
+    if callable(func_path_or_callable):
+        return func_path_or_callable  # type: ignore[return-value]
+    if ":" not in func_path_or_callable:
+        raise ValueError(f"Invalid func path '{func_path_or_callable}' (expected 'module:func')")
+    module_path, func_name = func_path_or_callable.split(":", 1)
+    module = importlib.import_module(module_path)
+    func = getattr(module, func_name, None)
+    if not callable(func):
+        raise ValueError(f"Resolved '{func_path_or_callable}' but attribute is not callable")
+    return func  # type: ignore[return-value]
+
+
 async def add_cron_job(
-    func_path: str,
+    func_path: str | Callable,
     job_id: str,
     cron_kwargs: dict,
     args: Optional[list] = None,
@@ -87,8 +108,9 @@ async def add_cron_job(
     """
     scheduler = await get_scheduler()
     trigger = CronTrigger(**cron_kwargs, timezone=settings.default_timezone)
+    func = _resolve_callable(func_path)
     await scheduler.add_schedule(
-        func_or_task_id=func_path,
+        func_or_task_id=func,
         trigger=trigger,
         id=job_id,
         args=args or [],
@@ -99,7 +121,7 @@ async def add_cron_job(
 
 
 async def add_interval_job(
-    func_path: str,
+    func_path: str | Callable,
     job_id: str,
     seconds: Optional[int] = None,
     minutes: Optional[int] = None,
@@ -118,8 +140,9 @@ async def add_interval_job(
         trigger_kwargs["hours"] = hours
 
     trigger = IntervalTrigger(**trigger_kwargs)
+    func = _resolve_callable(func_path)
     await scheduler.add_schedule(
-        func_or_task_id=func_path,
+        func_or_task_id=func,
         trigger=trigger,
         id=job_id,
         args=args or [],
@@ -130,7 +153,7 @@ async def add_interval_job(
 
 
 async def add_one_shot_job(
-    func_path: str,
+    func_path: str | Callable,
     job_id: str,
     run_at: str,
     args: Optional[list] = None,
@@ -150,8 +173,9 @@ async def add_one_shot_job(
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=ZoneInfo(settings.default_timezone))
     trigger = DateTrigger(run_time=dt)
+    func = _resolve_callable(func_path)
     await scheduler.add_schedule(
-        func_or_task_id=func_path,
+        func_or_task_id=func,
         trigger=trigger,
         id=job_id,
         args=args or [],
@@ -211,7 +235,7 @@ async def sync_tasks_from_db() -> dict:
         async with async_session() as session:
             # Get all active tasks that should be in the scheduler
             result = await session.execute(
-                select(ScheduledTask).where(ScheduledTask.is_active == True)
+                select(ScheduledTask)
             )
             tasks = result.scalars().all()
 
@@ -221,44 +245,59 @@ async def sync_tasks_from_db() -> dict:
             current_job_ids = {s.id for s in current_schedules}
 
             for task in tasks:
+                # If paused in DB, ensure it's not scheduled live
+                if not task.is_active:
+                    if task.apscheduler_id in current_job_ids:
+                        try:
+                            await scheduler.remove_schedule(task.apscheduler_id)
+                            logger.info("Removed paused job from scheduler: %s", task.apscheduler_id)
+                        except Exception as e:
+                            logger.warning("Could not remove paused job %s: %s", task.apscheduler_id, e)
+                    skipped.append(task.apscheduler_id)
+                    continue
+
+                # Active: if already present, skip; else add
                 if task.apscheduler_id in current_job_ids:
                     skipped.append(task.apscheduler_id)
                     continue
 
-                # This task needs to be added to scheduler
                 try:
+                    func_path = task.job_function
+                    kwargs = task.job_args or {"user_id": task.user_id, "message": task.description}
                     if task.trigger_type == "cron":
                         cron = task.trigger_config.get("cron", {})
                         await add_cron_job(
-                            func_path="src.scheduler.jobs:send_reminder",
+                            func_path=func_path,
                             job_id=task.apscheduler_id,
                             cron_kwargs={
                                 "hour": cron.get("hour", 9),
                                 "minute": cron.get("minute", 0),
                                 "day_of_week": cron.get("day_of_week", "*"),
                             },
-                            kwargs={"user_id": task.user_id, "message": task.description},
+                            kwargs=kwargs,
                         )
                     elif task.trigger_type == "interval":
                         interval = task.trigger_config.get("interval", {})
                         seconds = interval.get("seconds", 3600)
                         await add_interval_job(
-                            func_path="src.scheduler.jobs:send_reminder",
+                            func_path=func_path,
                             job_id=task.apscheduler_id,
                             seconds=seconds,
-                            kwargs={"user_id": task.user_id, "message": task.description},
+                            kwargs=kwargs,
                         )
                     elif task.trigger_type == "once":
                         once = task.trigger_config.get("once", {})
                         run_at_str = once.get("run_at")
                         if run_at_str:
-                            from datetime import datetime, timezone
-                            run_at = datetime.fromisoformat(run_at_str.replace("Z", "+00:00"))
+                            from datetime import datetime
+                            run_at_iso = datetime.fromisoformat(
+                                run_at_str.replace("Z", "+00:00")
+                            ).isoformat()
                             await add_one_shot_job(
-                                func_path="src.scheduler.jobs:send_reminder",
+                                func_path=func_path,
                                 job_id=task.apscheduler_id,
-                                run_at=run_at,
-                                kwargs={"user_id": task.user_id, "message": task.description},
+                                run_at=run_at_iso,
+                                kwargs=kwargs,
                             )
 
                     added.append(task.apscheduler_id)
@@ -267,15 +306,37 @@ async def sync_tasks_from_db() -> dict:
                 except Exception as e:
                     logger.error("Failed to sync task %s: %s", task.apscheduler_id, e)
                     errors.append(f"{task.apscheduler_id}: {e}")
+                    try:
+                        from src.db.models import AuditLog
+                        session.add(AuditLog(
+                            user_id=task.user_id,
+                            direction="outbound",
+                            platform="scheduler",
+                            agent_name="apscheduler",
+                            message_text=f"Failed to sync job {task.apscheduler_id}",
+                            tools_used={
+                                "error": True,
+                                "job_id": task.apscheduler_id,
+                                "trigger_type": task.trigger_type,
+                                "trigger_config": task.trigger_config,
+                                "exception": str(e),
+                            },
+                        ))
+                        await session.commit()
+                    except Exception:
+                        # Avoid crashing sync due to logging issues
+                        pass
 
     except Exception as e:
         logger.error("DB sync failed: %s", e)
         return {"error": str(e)}
 
-    return {
+    summary = {
         "added": len(added),
         "skipped": len(skipped),
         "errors": len(errors),
         "added_jobs": added,
         "error_details": errors,
     }
+    logger.info("Scheduler DB sync summary: added=%d skipped=%d errors=%d", len(added), len(skipped), len(errors))
+    return summary

@@ -9,8 +9,10 @@ import {
   AttachMoney, Build, Schedule, TrendingUp, Psychology,
   Add, Refresh, FolderSpecial, Chat, Warning, CheckCircle,
   Delete, PauseCircle, PlayCircle, Sync, School, Edit, Science,
-  Settings, HealthAndSafety, Timer, PlayArrow,
+  Settings, HealthAndSafety, Timer, PlayArrow, AccountTree, Stop,
+  BugReport, WorkHistory, Timeline,
 } from '@mui/icons-material';
+import Drawer from '@mui/material/Drawer';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer, Tooltip as RTooltip } from 'recharts';
 import axios from 'axios';
 
@@ -26,6 +28,10 @@ function Dashboard() {
   const [persona, setPersona] = useState(null);
   const [orgs, setOrgs] = useState([]);
   const [skills, setSkills] = useState([]);
+  const [budget, setBudget] = useState(null);
+  const [bgJobs, setBgJobs] = useState([]);
+  const [repairs, setRepairs] = useState([]);
+  const [traceDrawer, setTraceDrawer] = useState({ open: false, sessionKey: null, steps: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [orgDialogOpen, setOrgDialogOpen] = useState(false);
@@ -33,7 +39,7 @@ function Dashboard() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [sumR, costR, toolR, schedR, actR, persR, orgR, skillsR] = await Promise.all([
+      const [sumR, costR, toolR, schedR, actR, persR, orgR, skillsR, budgetR, bgR, repR] = await Promise.all([
         axios.get(`${API}/dashboard`),
         axios.get(`${API}/costs?days=30`),
         axios.get(`${API}/tools`),
@@ -42,6 +48,9 @@ function Dashboard() {
         axios.get(`${API}/persona`),
         axios.get(`${API}/orgs`),
         axios.get(`${API}/skills`),
+        axios.get(`${API}/budget`),
+        axios.get(`${API}/background-jobs`).catch(() => ({ data: [] })),
+        axios.get(`${API}/repairs`).catch(() => ({ data: [] })),
       ]);
       setSummary(sumR.data);
       setCosts(costR.data);
@@ -51,6 +60,9 @@ function Dashboard() {
       setPersona(persR.data);
       setOrgs(orgR.data);
       setSkills(skillsR.data);
+      setBudget(budgetR.data);
+      setBgJobs(bgR.data);
+      setRepairs(repR.data);
       setError(null);
     } catch (e) {
       setError('Failed to connect to Atlas Dashboard API');
@@ -120,20 +132,28 @@ function Dashboard() {
       </Grid>
 
       {/* Tab Navigation */}
-      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }}>
+      <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }} variant="scrollable" scrollButtons="auto">
         <Tab label="Overview" />
         <Tab label="Organizations" />
         <Tab label="Activity" />
+        <Tab label="Tools" />
         <Tab label="Skills" />
+        <Tab label="Repairs" icon={repairs.filter(r => !r.auto_applied && r.status === 'open').length > 0 ? <BugReport color="warning" fontSize="small" /> : undefined} iconPosition="end" />
+        <Tab label="Jobs" icon={bgJobs.filter(j => j.status === 'running').length > 0 ? <WorkHistory color="info" fontSize="small" /> : undefined} iconPosition="end" />
         <Tab label="System" />
       </Tabs>
 
       {/* Tab Content */}
-      {tab === 0 && <OverviewTab costs={costs} tools={tools} schedules={schedules} persona={persona} quality={summary?.quality} fetchAll={fetchAll} />}
+      {tab === 0 && <OverviewTab costs={costs} tools={tools} schedules={schedules} persona={persona} quality={summary?.quality} budget={budget} fetchAll={fetchAll} />}
       {tab === 1 && <OrgsTab orgs={orgs} onCreateOrg={() => setOrgDialogOpen(true)} onSelectOrg={setSelectedOrg} fetchAll={fetchAll} />}
-      {tab === 2 && <ActivityTab activity={activity} />}
-      {tab === 3 && <SkillsTab skills={skills} fetchAll={fetchAll} />}
-      {tab === 4 && <SchedulerDiagnosticsTab />}
+      {tab === 2 && <ActivityTab activity={activity} onViewTrace={setTraceDrawer} />}
+      {tab === 3 && <ToolsTab tools={tools} fetchAll={fetchAll} />}
+      {tab === 4 && <SkillsTab skills={skills} fetchAll={fetchAll} />}
+      {tab === 5 && <RepairsTab repairs={repairs} fetchAll={fetchAll} />}
+      {tab === 6 && <BackgroundJobsTab jobs={bgJobs} fetchAll={fetchAll} />}
+      {tab === 7 && <SchedulerDiagnosticsTab />}
+
+      <TraceDrawer open={traceDrawer.open} steps={traceDrawer.steps} sessionKey={traceDrawer.sessionKey} onClose={() => setTraceDrawer({ open: false, sessionKey: null, steps: [] })} />
 
       {/* Create Org Dialog */}
       <Dialog open={orgDialogOpen} onClose={() => setOrgDialogOpen(false)} maxWidth="sm" fullWidth>
@@ -177,7 +197,7 @@ function getQualityColor(q) {
 
 // ── Overview Tab ──────────────────────────────────────────────────────
 
-function OverviewTab({ costs, tools, schedules, persona, quality, fetchAll }) {
+function OverviewTab({ costs, tools, schedules, persona, quality, budget, fetchAll }) {
   return (
     <Grid container spacing={3}>
       {/* Cost Chart */}
@@ -203,7 +223,12 @@ function OverviewTab({ costs, tools, schedules, persona, quality, fetchAll }) {
       {/* Quality */}
       <Grid item xs={12} md={4}>
         <Paper sx={{ p: 2, height: '100%' }}>
-          <Typography variant="h6" mb={1}>Quality</Typography>
+          <Box display="flex" alignItems="center" gap={1} mb={1}>
+            <Typography variant="h6">Quality</Typography>
+            <Tooltip title="Quality is scored 0–1 based on how accurately Atlas routes requests to the right tools and agents. Each interaction is evaluated by the reflector and averaged over the last 20 responses. Higher is better.">
+              <Box component="span" sx={{ cursor: 'help', color: 'text.secondary', fontSize: 16 }}>ⓘ</Box>
+            </Tooltip>
+          </Box>
           {quality?.recent_scores?.length > 0 ? (
             <>
               <Box display="flex" alignItems="baseline" mb={1}>
@@ -216,16 +241,52 @@ function OverviewTab({ costs, tools, schedules, persona, quality, fetchAll }) {
                 label={quality.trend || 'stable'}
                 size="small"
                 color={quality.trend === 'improving' ? 'success' : quality.trend === 'declining' ? 'error' : 'default'}
-                sx={{ mb: 2 }}
+                sx={{ mb: 1.5 }}
               />
-              <ResponsiveContainer width="100%" height={120}>
+              <ResponsiveContainer width="100%" height={100}>
                 <LineChart data={quality.recent_scores.map((s, i) => ({ i, score: s }))}>
                   <Line type="monotone" dataKey="score" stroke="#2196f3" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
+              <Box mt={1.5} sx={{ borderTop: '1px solid #eee', pt: 1 }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={600}>Score guide:</Typography>
+                <Box display="flex" flexDirection="column" gap={0.3} mt={0.5}>
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: '#4caf50', flexShrink: 0 }} />
+                    <Typography variant="caption" color="text.secondary">≥ 0.80 — Excellent (ideal routing)</Typography>
+                  </Box>
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: '#ff9800', flexShrink: 0 }} />
+                    <Typography variant="caption" color="text.secondary">0.60–0.79 — Good (minor misroutes)</Typography>
+                  </Box>
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: '#f44336', flexShrink: 0 }} />
+                    <Typography variant="caption" color="text.secondary">{'< 0.60 — Needs attention'}</Typography>
+                  </Box>
+                </Box>
+              </Box>
             </>
           ) : (
-            <Typography color="text.secondary">No quality data yet</Typography>
+            <Box>
+              <Typography color="text.secondary" mb={1.5}>No quality data yet — score appears after your first interactions.</Typography>
+              <Box sx={{ borderTop: '1px solid #eee', pt: 1 }}>
+                <Typography variant="caption" color="text.secondary" fontWeight={600}>Score guide:</Typography>
+                <Box display="flex" flexDirection="column" gap={0.3} mt={0.5}>
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: '#4caf50', flexShrink: 0 }} />
+                    <Typography variant="caption" color="text.secondary">≥ 0.80 — Excellent</Typography>
+                  </Box>
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: '#ff9800', flexShrink: 0 }} />
+                    <Typography variant="caption" color="text.secondary">0.60–0.79 — Good</Typography>
+                  </Box>
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <Box sx={{ width: 10, height: 10, borderRadius: '50%', bgcolor: '#f44336', flexShrink: 0 }} />
+                    <Typography variant="caption" color="text.secondary">{'< 0.60 — Needs attention'}</Typography>
+                  </Box>
+                </Box>
+              </Box>
+            </Box>
           )}
         </Paper>
       </Grid>
@@ -257,6 +318,13 @@ function OverviewTab({ costs, tools, schedules, persona, quality, fetchAll }) {
         <SchedulesPanel schedules={schedules} fetchAll={fetchAll} />
       </Grid>
 
+      {/* Budget */}
+      {budget && (
+        <Grid item xs={12}>
+          <BudgetPanel budget={budget} />
+        </Grid>
+      )}
+
       {/* Persona */}
       <Grid item xs={12}>
         <Paper sx={{ p: 2 }}>
@@ -285,6 +353,87 @@ function OverviewTab({ costs, tools, schedules, persona, quality, fetchAll }) {
         </Paper>
       </Grid>
     </Grid>
+  );
+}
+
+
+// ── Budget Panel ──────────────────────────────────────────────────────
+
+function BudgetPanel({ budget }) {
+  const barColor = (pct) => {
+    if (pct >= 100) return '#f44336';
+    if (pct >= 80) return '#ff9800';
+    return '#4caf50';
+  };
+
+  const BudgetRow = ({ label, spent, cap, pct, requests }) => (
+    <Box mb={1.5}>
+      <Box display="flex" justifyContent="space-between" alignItems="baseline" mb={0.5}>
+        <Typography variant="body2" fontWeight={500}>{label}</Typography>
+        <Box display="flex" alignItems="baseline" gap={1}>
+          <Typography variant="body2" fontWeight={600} color={barColor(pct)}>
+            ${spent.toFixed(4)}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">/ ${cap.toFixed(2)} cap</Typography>
+          <Typography variant="caption" color="text.disabled">({pct}%)</Typography>
+        </Box>
+      </Box>
+      <Box sx={{ height: 8, bgcolor: '#e0e0e0', borderRadius: 4, overflow: 'hidden' }}>
+        <Box
+          sx={{
+            height: '100%',
+            width: `${Math.min(pct, 100)}%`,
+            bgcolor: barColor(pct),
+            borderRadius: 4,
+            transition: 'width 0.4s ease',
+          }}
+        />
+      </Box>
+      {requests > 0 && (
+        <Typography variant="caption" color="text.disabled">{requests} request{requests !== 1 ? 's' : ''}</Typography>
+      )}
+    </Box>
+  );
+
+  return (
+    <Paper sx={{ p: 2 }}>
+      <Box display="flex" alignItems="center" gap={1} mb={2}>
+        <AttachMoney sx={{ color: '#4caf50' }} />
+        <Typography variant="h6">Budget</Typography>
+        <Tooltip title="Daily and monthly spending limits are set via DAILY_COST_CAP_USD and MONTHLY_COST_CAP_USD in your .env file.">
+          <Box component="span" sx={{ cursor: 'help', color: 'text.secondary', fontSize: 16 }}>ⓘ</Box>
+        </Tooltip>
+      </Box>
+      <Grid container spacing={3}>
+        <Grid item xs={12} md={6}>
+          <BudgetRow
+            label="Today"
+            spent={budget.today_usd}
+            cap={budget.daily_cap_usd}
+            pct={budget.daily_pct}
+            requests={budget.request_count_today}
+          />
+        </Grid>
+        <Grid item xs={12} md={6}>
+          <BudgetRow
+            label="This month"
+            spent={budget.month_usd}
+            cap={budget.monthly_cap_usd}
+            pct={budget.monthly_pct}
+            requests={budget.request_count_month}
+          />
+        </Grid>
+      </Grid>
+      {(budget.daily_pct >= 80 || budget.monthly_pct >= 80) && (
+        <Alert severity={budget.daily_pct >= 100 || budget.monthly_pct >= 100 ? 'error' : 'warning'} sx={{ mt: 1 }}>
+          {budget.daily_pct >= 100
+            ? 'Daily cap reached — new requests are blocked until midnight.'
+            : budget.monthly_pct >= 100
+            ? 'Monthly cap reached — new requests are blocked until next month.'
+            : `Approaching limit — ${budget.daily_pct >= 80 ? `daily at ${budget.daily_pct}%` : `monthly at ${budget.monthly_pct}%`}. Adjust caps in .env if needed.`}
+        </Alert>
+      )}
+    </Paper>
   );
 }
 
@@ -558,6 +707,28 @@ function SchedulesPanel({ schedules, fetchAll }) {
 // ── Organizations Tab ─────────────────────────────────────────────────
 
 function OrgsTab({ orgs, onCreateOrg, onSelectOrg, fetchAll }) {
+  const handleToggleOrg = async (event, org) => {
+    event.stopPropagation();
+    try {
+      const endpoint = org.status === 'active' ? 'pause' : 'resume';
+      await axios.post(`${API}/orgs/${org.id}/${endpoint}`);
+      fetchAll();
+    } catch (e) {
+      alert('Organization update failed: ' + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const handleDeleteOrg = async (event, org) => {
+    event.stopPropagation();
+    if (!window.confirm(`Delete organization "${org.name}"? This will also remove its agents, tasks, and activity log.`)) return;
+    try {
+      await axios.delete(`${API}/orgs/${org.id}`);
+      fetchAll();
+    } catch (e) {
+      alert('Organization delete failed: ' + (e.response?.data?.detail || e.message));
+    }
+  };
+
   return (
     <Box>
       <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
@@ -585,6 +756,18 @@ function OrgsTab({ orgs, onCreateOrg, onSelectOrg, fetchAll }) {
                     <Chip label={`${org.task_count} tasks`} size="small" variant="outlined" />
                     <Chip label={`${org.completed_tasks} done`} size="small" variant="outlined" color="success" />
                   </Box>
+                  <Box display="flex" justifyContent="flex-end" gap={0.5} mt={2}>
+                    <Tooltip title={org.status === 'active' ? 'Deactivate organization' : 'Reactivate organization'}>
+                      <IconButton size="small" onClick={(event) => handleToggleOrg(event, org)} color={org.status === 'active' ? 'warning' : 'success'}>
+                        {org.status === 'active' ? <PauseCircle fontSize="small" /> : <PlayCircle fontSize="small" />}
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Delete organization">
+                      <IconButton size="small" onClick={(event) => handleDeleteOrg(event, org)} color="error">
+                        <Delete fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
                 </CardContent>
               </Card>
             </Grid>
@@ -598,7 +781,15 @@ function OrgsTab({ orgs, onCreateOrg, onSelectOrg, fetchAll }) {
 
 // ── Activity Tab ──────────────────────────────────────────────────────
 
-function ActivityTab({ activity }) {
+function ActivityTab({ activity, onViewTrace }) {
+  const handleViewTrace = async (a) => {
+    try {
+      const sessionKey = `agent_session:${a.telegram_id || ''}`;
+      const res = await axios.get(`${API}/traces`, { params: { session_key: sessionKey, limit: 50 } });
+      onViewTrace({ open: true, sessionKey, steps: res.data });
+    } catch (e) { console.error(e); }
+  };
+
   return (
     <Paper sx={{ p: 2 }}>
       <Typography variant="h6" mb={2}>Recent Activity</Typography>
@@ -607,7 +798,13 @@ function ActivityTab({ activity }) {
       ) : (
         <List dense>
           {activity.map(a => (
-            <ListItem key={a.id} divider>
+            <ListItem key={a.id} divider
+              secondaryAction={
+                <Tooltip title="View agent thought trace">
+                  <IconButton size="small" onClick={() => handleViewTrace(a)}><Timeline fontSize="small" /></IconButton>
+                </Tooltip>
+              }
+            >
               <ListItemText
                 primary={
                   <Box display="flex" alignItems="center" gap={1}>
@@ -616,12 +813,168 @@ function ActivityTab({ activity }) {
                   </Box>
                 }
                 secondary={
-                  <Box display="flex" gap={2} mt={0.5}>
+                  <Box display="flex" gap={2} mt={0.5} flexWrap="wrap">
                     <Typography variant="caption">{a.timestamp ? new Date(a.timestamp).toLocaleString() : ''}</Typography>
                     {a.agent_name && <Chip label={a.agent_name} size="small" />}
                     {a.model_used && <Chip label={a.model_used} size="small" variant="outlined" />}
                     {a.cost_usd != null && <Typography variant="caption">${a.cost_usd.toFixed(4)}</Typography>}
                     {a.duration_ms != null && <Typography variant="caption">{a.duration_ms}ms</Typography>}
+                  </Box>
+                }
+              />
+            </ListItem>
+          ))}
+        </List>
+      )}
+    </Paper>
+  );
+}
+
+
+// ── Trace Drawer ──────────────────────────────────────────────────────
+
+function TraceDrawer({ open, steps, sessionKey, onClose }) {
+  return (
+    <Drawer anchor="right" open={open} onClose={onClose} PaperProps={{ sx: { width: 520, p: 3 } }}>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+        <Typography variant="h6">Agent Thought Trace</Typography>
+        <IconButton onClick={onClose}><Stop /></IconButton>
+      </Box>
+      {sessionKey && <Typography variant="caption" color="text.secondary" mb={2} display="block">Session: {sessionKey}</Typography>}
+      {steps.length === 0 ? (
+        <Typography color="text.secondary">No trace steps recorded for this session yet.</Typography>
+      ) : (
+        <Box>
+          {steps.map((step, idx) => (
+            <Box key={step.id} sx={{ mb: 2, pl: 2, borderLeft: '3px solid', borderColor: step.tool_result_preview ? 'success.light' : 'primary.light' }}>
+              <Box display="flex" alignItems="center" gap={1} mb={0.5}>
+                <Chip label={`#${step.step_index + 1}`} size="small" />
+                {step.agent_name && <Chip label={step.agent_name} size="small" color="primary" variant="outlined" />}
+                {step.tool_name && <Chip label={step.tool_name} size="small" color="secondary" />}
+                {step.duration_ms != null && <Typography variant="caption" color="text.secondary">{step.duration_ms}ms</Typography>}
+              </Box>
+              {step.tool_args && (
+                <Box sx={{ bgcolor: 'grey.100', borderRadius: 1, p: 1, mb: 0.5, fontSize: 11, fontFamily: 'monospace', overflowX: 'auto' }}>
+                  {JSON.stringify(step.tool_args, null, 2).slice(0, 300)}
+                </Box>
+              )}
+              {step.tool_result_preview && (
+                <Typography variant="caption" color="text.secondary" sx={{ fontFamily: 'monospace', display: 'block', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                  ↳ {step.tool_result_preview}
+                </Typography>
+              )}
+              <Typography variant="caption" color="text.disabled">{step.timestamp ? new Date(step.timestamp).toLocaleTimeString() : ''}</Typography>
+            </Box>
+          ))}
+        </Box>
+      )}
+    </Drawer>
+  );
+}
+
+
+// ── Repairs Tab ───────────────────────────────────────────────────────
+
+function RepairsTab({ repairs, fetchAll }) {
+  const riskColor = (r) => r === 'low' ? 'success' : r === 'medium' ? 'warning' : 'error';
+  const statusColor = (s) => s === 'deployed' ? 'success' : s === 'open' || s === 'plan_ready' ? 'warning' : s === 'verification_failed' ? 'error' : 'default';
+
+  return (
+    <Paper sx={{ p: 2 }}>
+      <Typography variant="h6" mb={2}>Repair Tickets</Typography>
+      {repairs.length === 0 ? (
+        <Typography color="text.secondary">No repair tickets yet.</Typography>
+      ) : (
+        <List dense>
+          {repairs.map(r => (
+            <ListItem key={r.id} divider
+              secondaryAction={
+                <Box display="flex" gap={1}>
+                  {r.auto_applied && <Chip label="Auto-applied" size="small" color="success" icon={<CheckCircle />} />}
+                  {!r.auto_applied && r.status === 'open' && <Chip label="Pending approval" size="small" color="warning" icon={<Warning />} />}
+                </Box>
+              }
+            >
+              <ListItemText
+                primary={
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <BugReport fontSize="small" color={statusColor(r.status)} />
+                    <Typography variant="body2" fontWeight={500}>{r.title}</Typography>
+                  </Box>
+                }
+                secondary={
+                  <Box display="flex" gap={1} mt={0.5} flexWrap="wrap">
+                    <Chip label={r.status} size="small" color={statusColor(r.status)} />
+                    <Chip label={`Risk: ${r.risk_level}`} size="small" color={riskColor(r.risk_level)} variant="outlined" />
+                    <Chip label={r.priority} size="small" variant="outlined" />
+                    <Typography variant="caption" color="text.secondary">{r.created_at ? new Date(r.created_at).toLocaleString() : ''}</Typography>
+                  </Box>
+                }
+              />
+            </ListItem>
+          ))}
+        </List>
+      )}
+    </Paper>
+  );
+}
+
+
+// ── Background Jobs Tab ───────────────────────────────────────────────
+
+function BackgroundJobsTab({ jobs, fetchAll }) {
+  const handleCancel = async (jobId) => {
+    try {
+      await axios.patch(`${API}/background-jobs/${jobId}/cancel`);
+      fetchAll();
+    } catch (e) { console.error(e); }
+  };
+
+  const statusColor = (s) => s === 'running' ? 'info' : s === 'done' ? 'success' : s === 'failed' ? 'error' : 'default';
+
+  return (
+    <Paper sx={{ p: 2 }}>
+      <Typography variant="h6" mb={2}>Background Jobs</Typography>
+      {jobs.length === 0 ? (
+        <Box>
+          <Typography color="text.secondary">No background jobs yet.</Typography>
+          <Typography variant="caption" color="text.secondary" display="block" mt={1}>
+            Say things like "Monitor my inbox and alert me when…" or "Keep watching my calendar until…" to start one.
+          </Typography>
+        </Box>
+      ) : (
+        <List dense>
+          {jobs.map(j => (
+            <ListItem key={j.id} divider
+              secondaryAction={
+                j.status === 'running' && (
+                  <Tooltip title="Cancel job">
+                    <IconButton size="small" color="error" onClick={() => handleCancel(j.id)}><Stop /></IconButton>
+                  </Tooltip>
+                )
+              }
+            >
+              <ListItemText
+                primary={
+                  <Box display="flex" alignItems="center" gap={1}>
+                    <WorkHistory fontSize="small" color={statusColor(j.status)} />
+                    <Typography variant="body2" fontWeight={500} sx={{ wordBreak: 'break-word', maxWidth: 340 }}>{j.goal}</Typography>
+                  </Box>
+                }
+                secondary={
+                  <Box mt={0.5}>
+                    <Box display="flex" gap={1} flexWrap="wrap" mb={0.5}>
+                      <Chip label={j.status} size="small" color={statusColor(j.status)} />
+                      <Typography variant="caption" color="text.secondary">
+                        {j.iterations_run}/{j.max_iterations} ticks
+                      </Typography>
+                      {j.done_condition && <Chip label={`Until: ${j.done_condition.slice(0, 40)}`} size="small" variant="outlined" />}
+                    </Box>
+                    {j.status === 'running' && (
+                      <LinearProgress variant="determinate" value={Math.round(j.iterations_run / j.max_iterations * 100)} sx={{ height: 4, borderRadius: 2, maxWidth: 300 }} />
+                    )}
+                    {j.result && <Typography variant="caption" color="text.secondary" display="block" mt={0.5} sx={{ fontStyle: 'italic' }}>{j.result.slice(0, 120)}</Typography>}
+                    <Typography variant="caption" color="text.disabled">{j.created_at ? new Date(j.created_at).toLocaleString() : ''}</Typography>
                   </Box>
                 }
               />
@@ -658,6 +1011,8 @@ function OrgDetailDialog({ org, onClose, fetchAll }) {
   const [activityLog, setActivityLog] = useState([]);
   const [agentForm, setAgentForm] = useState(false);
   const [taskForm, setTaskForm] = useState(false);
+  const [editingAgent, setEditingAgent] = useState(null);
+  const [editingTask, setEditingTask] = useState(null);
 
   const fetchOrgData = useCallback(async () => {
     try {
@@ -688,6 +1043,36 @@ function OrgDetailDialog({ org, onClose, fetchAll }) {
     fetchAll();
   };
 
+  const handleUpdateAgent = async (agentId, data) => {
+    await axios.patch(`${API}/orgs/${org.id}/agents/${agentId}`, data);
+    setEditingAgent(null);
+    fetchOrgData();
+    fetchAll();
+  };
+
+  const handleDeleteAgent = async (agent) => {
+    if (!window.confirm(`Delete agent "${agent.name}"?`)) return;
+    await axios.delete(`${API}/orgs/${org.id}/agents/${agent.id}`);
+    setEditingAgent(null);
+    fetchOrgData();
+    fetchAll();
+  };
+
+  const handleUpdateTask = async (taskId, data) => {
+    await axios.patch(`${API}/orgs/${org.id}/tasks/${taskId}`, data);
+    setEditingTask(null);
+    fetchOrgData();
+    fetchAll();
+  };
+
+  const handleDeleteTask = async (task) => {
+    if (!window.confirm(`Delete task "${task.title}"?`)) return;
+    await axios.delete(`${API}/orgs/${org.id}/tasks/${task.id}`);
+    setEditingTask(null);
+    fetchOrgData();
+    fetchAll();
+  };
+
   const handleCompleteTask = async (taskId) => {
     await axios.post(`${API}/orgs/${org.id}/tasks/${taskId}/complete`);
     fetchOrgData();
@@ -698,7 +1083,10 @@ function OrgDetailDialog({ org, onClose, fetchAll }) {
     <Dialog open onClose={onClose} maxWidth="md" fullWidth>
       <DialogTitle>
         <Box display="flex" justifyContent="space-between" alignItems="center">
-          <Typography variant="h6">{org.name}</Typography>
+          <Box>
+            <Typography variant="h6">{org.name}</Typography>
+            <Typography variant="caption" color="text.secondary">Org ID: {org.id}</Typography>
+          </Box>
           <Chip label={org.status} color={org.status === 'active' ? 'success' : 'default'} />
         </Box>
         {org.goal && <Typography variant="body2" color="text.secondary">{org.goal}</Typography>}
@@ -711,9 +1099,24 @@ function OrgDetailDialog({ org, onClose, fetchAll }) {
             <Button size="small" startIcon={<Add />} onClick={() => setAgentForm(!agentForm)}>Add Agent</Button>
           </Box>
           {agentForm && <OrgAgentForm onSubmit={handleAddAgent} onCancel={() => setAgentForm(false)} />}
-          {agents.map(a => (
-            <Chip key={a.id} label={`${a.name} (${a.role})`} sx={{ mr: 1, mb: 1 }} color="primary" variant="outlined" />
-          ))}
+          {editingAgent && (
+            <OrgAgentForm
+              initialValue={editingAgent}
+              submitLabel="Save"
+              onSubmit={(data) => handleUpdateAgent(editingAgent.id, data)}
+              onCancel={() => setEditingAgent(null)}
+            />
+          )}
+          <List dense>
+            {agents.map(a => (
+              <AgentListItem
+                key={a.id}
+                agent={a}
+                onEdit={() => setEditingAgent(a)}
+                onDelete={() => handleDeleteAgent(a)}
+              />
+            ))}
+          </List>
           {agents.length === 0 && !agentForm && <Typography variant="body2" color="text.secondary">No agents yet</Typography>}
         </Box>
 
@@ -724,16 +1127,28 @@ function OrgDetailDialog({ org, onClose, fetchAll }) {
             <Button size="small" startIcon={<Add />} onClick={() => setTaskForm(!taskForm)}>Add Task</Button>
           </Box>
           {taskForm && <OrgTaskForm agents={agents} onSubmit={handleAddTask} onCancel={() => setTaskForm(false)} />}
+          {editingTask && (
+            <OrgTaskForm
+              agents={agents}
+              initialValue={editingTask}
+              submitLabel="Save"
+              onSubmit={(data) => handleUpdateTask(editingTask.id, data)}
+              onCancel={() => setEditingTask(null)}
+            />
+          )}
           <List dense>
             {tasks.map(t => (
-              <ListItem key={t.id} divider secondaryAction={
-                t.status !== 'completed' && (
+              <ListItem key={t.id} divider secondaryAction={<Box>
+                {t.status !== 'completed' && (
                   <Tooltip title="Mark Complete"><IconButton size="small" onClick={() => handleCompleteTask(t.id)} color="success"><CheckCircle /></IconButton></Tooltip>
-                )
-              }>
+                )}
+                <Tooltip title="Edit task"><IconButton size="small" onClick={() => setEditingTask(t)}><Edit fontSize="small" /></IconButton></Tooltip>
+                <Tooltip title="Delete task"><IconButton size="small" color="error" onClick={() => handleDeleteTask(t)}><Delete fontSize="small" /></IconButton></Tooltip>
+              </Box>}>
                 <ListItemText
                   primary={<Box display="flex" alignItems="center" gap={1}>
                     <Typography variant="body2">{t.title}</Typography>
+                    <Chip label={`ID ${t.id}`} size="small" variant="outlined" />
                     <Chip label={t.priority} size="small" color={t.priority === 'high' ? 'error' : t.priority === 'critical' ? 'error' : 'default'} />
                     <Chip label={t.status} size="small" color={t.status === 'completed' ? 'success' : 'primary'} variant="outlined" />
                   </Box>}
@@ -768,15 +1183,140 @@ function OrgDetailDialog({ org, onClose, fetchAll }) {
 }
 
 
-function OrgAgentForm({ onSubmit, onCancel }) {
-  const [f, setF] = useState({ name: '', role: '', description: '' });
+function AgentListItem({ agent: a, onEdit, onDelete }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasSkills = a.skills?.length > 0;
+  const hasTools = a.allowed_tools?.length > 0;
+  const hasInstructions = !!a.instructions;
+  const hasValidation = a.tools_config?.validation;
+
+  return (
+    <ListItem divider alignItems="flex-start" sx={{ flexDirection: 'column', pr: 1 }}>
+      <Box display="flex" width="100%" alignItems="center">
+        <Box flex={1}>
+          <Box display="flex" alignItems="center" gap={1} flexWrap="wrap">
+            <Typography variant="body2" fontWeight={600}>{a.name}</Typography>
+            <Chip label={a.role} size="small" variant="outlined" />
+            <Chip label={`ID ${a.id}`} size="small" />
+            {hasSkills && a.skills.map(s => (
+              <Chip
+                key={s}
+                label={s}
+                size="small"
+                color="primary"
+                variant="outlined"
+                sx={{ fontSize: 10 }}
+                title="Skill"
+              />
+            ))}
+            {hasTools && a.allowed_tools.map(t => (
+              <Chip
+                key={t}
+                label={t}
+                size="small"
+                color="secondary"
+                variant="outlined"
+                sx={{ fontSize: 10 }}
+                title="Tool"
+              />
+            ))}
+          </Box>
+          {a.description && (
+            <Typography variant="caption" color="text.secondary">{a.description}</Typography>
+          )}
+          {hasValidation && (
+            <Box display="flex" gap={0.5} mt={0.5} flexWrap="wrap">
+              {Object.entries(hasValidation.skills || {}).map(([sk, status]) => (
+                <Chip key={sk} label={`${sk}: ${status}`} size="small"
+                  color={status.includes('⚠️') ? 'warning' : 'success'} sx={{ fontSize: 9 }} />
+              ))}
+              {Object.entries(hasValidation.tools || {}).map(([tn, status]) => (
+                <Chip key={tn} label={`${tn}: ${status}`} size="small"
+                  color={status.includes('⚠️') ? 'warning' : 'success'} sx={{ fontSize: 9 }} />
+              ))}
+            </Box>
+          )}
+        </Box>
+        <Box display="flex" alignItems="center" gap={0.5} ml={1}>
+          {hasInstructions && (
+            <Tooltip title={expanded ? 'Hide instructions' : 'Show instructions'}>
+              <IconButton size="small" onClick={() => setExpanded(e => !e)}>
+                <Settings fontSize="small" color={expanded ? 'primary' : 'inherit'} />
+              </IconButton>
+            </Tooltip>
+          )}
+          <Tooltip title="Edit agent"><IconButton size="small" onClick={onEdit}><Edit fontSize="small" /></IconButton></Tooltip>
+          <Tooltip title="Delete agent"><IconButton size="small" color="error" onClick={onDelete}><Delete fontSize="small" /></IconButton></Tooltip>
+        </Box>
+      </Box>
+      {expanded && hasInstructions && (
+        <Box mt={1} p={1} bgcolor="#f5f5f5" borderRadius={1} width="100%">
+          <Typography variant="caption" color="text.secondary" fontWeight={600}>Instructions:</Typography>
+          <Typography variant="caption" component="pre" sx={{ whiteSpace: 'pre-wrap', display: 'block', mt: 0.5 }}>
+            {a.instructions}
+          </Typography>
+        </Box>
+      )}
+    </ListItem>
+  );
+}
+
+
+function OrgAgentForm({ onSubmit, onCancel, initialValue = null, submitLabel = 'Add' }) {
+  const [f, setF] = useState({
+    name: initialValue?.name || '',
+    role: initialValue?.role || '',
+    description: initialValue?.description || '',
+    instructions: initialValue?.instructions || '',
+    skills: Array.isArray(initialValue?.skills) ? initialValue.skills.join(', ') : (initialValue?.skills || ''),
+    allowed_tools: Array.isArray(initialValue?.allowed_tools) ? initialValue.allowed_tools.join(', ') : (initialValue?.allowed_tools || ''),
+  });
+
+  const handleSubmit = () => {
+    onSubmit({
+      name: f.name,
+      role: f.role,
+      description: f.description,
+      instructions: f.instructions,
+      skills: f.skills.split(',').map(s => s.trim()).filter(Boolean),
+      allowed_tools: f.allowed_tools.split(',').map(s => s.trim()).filter(Boolean),
+    });
+  };
+
   return (
     <Box sx={{ p: 1, mb: 2, border: '1px solid #e0e0e0', borderRadius: 1 }}>
-      <TextField size="small" fullWidth label="Agent Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} margin="dense" required />
-      <TextField size="small" fullWidth label="Role" value={f.role} onChange={e => setF({ ...f, role: e.target.value })} margin="dense" required placeholder="e.g., Research Analyst" />
-      <TextField size="small" fullWidth label="Description" value={f.description} onChange={e => setF({ ...f, description: e.target.value })} margin="dense" />
+      <Box display="flex" gap={1}>
+        <TextField size="small" fullWidth label="Agent Name" value={f.name} onChange={e => setF({ ...f, name: e.target.value })} margin="dense" required />
+        <TextField size="small" fullWidth label="Role" value={f.role} onChange={e => setF({ ...f, role: e.target.value })} margin="dense" required placeholder="e.g., auditor" />
+      </Box>
+      <TextField size="small" fullWidth label="Description" value={f.description} onChange={e => setF({ ...f, description: e.target.value })} margin="dense" placeholder="What this agent does" />
+      <TextField
+        size="small" fullWidth label="Skills (comma-separated)"
+        value={f.skills}
+        onChange={e => setF({ ...f, skills: e.target.value })}
+        margin="dense"
+        placeholder="e.g., code_audit, log_analysis"
+        helperText="Skill IDs this agent has access to"
+      />
+      <TextField
+        size="small" fullWidth label="Allowed Tools (comma-separated)"
+        value={f.allowed_tools}
+        onChange={e => setF({ ...f, allowed_tools: e.target.value })}
+        margin="dense"
+        placeholder="e.g., list_tools, run_code_audit"
+        helperText="Tool names this agent is permitted to use"
+      />
+      <TextField
+        size="small" fullWidth label="Instructions"
+        value={f.instructions}
+        onChange={e => setF({ ...f, instructions: e.target.value })}
+        margin="dense"
+        multiline
+        rows={4}
+        placeholder="Detailed behaviour instructions for this agent (Markdown supported)"
+      />
       <Box display="flex" gap={1} mt={1}>
-        <Button size="small" variant="contained" onClick={() => onSubmit(f)}>Add</Button>
+        <Button size="small" variant="contained" onClick={handleSubmit}>{submitLabel}</Button>
         <Button size="small" onClick={onCancel}>Cancel</Button>
       </Box>
     </Box>
@@ -784,8 +1324,14 @@ function OrgAgentForm({ onSubmit, onCancel }) {
 }
 
 
-function OrgTaskForm({ agents, onSubmit, onCancel }) {
-  const [f, setF] = useState({ title: '', description: '', priority: 'medium', agent_id: '' });
+function OrgTaskForm({ agents, onSubmit, onCancel, initialValue = null, submitLabel = 'Add' }) {
+  const [f, setF] = useState({
+    title: initialValue?.title || '',
+    description: initialValue?.description || '',
+    priority: initialValue?.priority || 'medium',
+    status: initialValue?.status || 'pending',
+    agent_id: initialValue?.agent_id || '',
+  });
   return (
     <Box sx={{ p: 1, mb: 2, border: '1px solid #e0e0e0', borderRadius: 1 }}>
       <TextField size="small" fullWidth label="Task Title" value={f.title} onChange={e => setF({ ...f, title: e.target.value })} margin="dense" required />
@@ -795,7 +1341,11 @@ function OrgTaskForm({ agents, onSubmit, onCancel }) {
           <MenuItem value="low">Low</MenuItem>
           <MenuItem value="medium">Medium</MenuItem>
           <MenuItem value="high">High</MenuItem>
-          <MenuItem value="critical">Critical</MenuItem>
+        </TextField>
+        <TextField size="small" select fullWidth label="Status" value={f.status} onChange={e => setF({ ...f, status: e.target.value })} margin="dense">
+          <MenuItem value="pending">Pending</MenuItem>
+          <MenuItem value="in_progress">In Progress</MenuItem>
+          <MenuItem value="completed">Completed</MenuItem>
         </TextField>
         <TextField size="small" select fullWidth label="Assign Agent" value={f.agent_id} onChange={e => setF({ ...f, agent_id: e.target.value ? parseInt(e.target.value) : '' })} margin="dense">
           <MenuItem value="">Unassigned</MenuItem>
@@ -803,9 +1353,128 @@ function OrgTaskForm({ agents, onSubmit, onCancel }) {
         </TextField>
       </Box>
       <Box display="flex" gap={1} mt={1}>
-        <Button size="small" variant="contained" onClick={() => onSubmit({ ...f, agent_id: f.agent_id || null })}>Add</Button>
+        <Button size="small" variant="contained" onClick={() => onSubmit({ ...f, agent_id: f.agent_id || null })}>{submitLabel}</Button>
         <Button size="small" onClick={onCancel}>Cancel</Button>
       </Box>
+    </Box>
+  );
+}
+
+
+// ── Tools Tab ────────────────────────────────────────────────────────
+
+function ToolsTab({ tools, fetchAll }) {
+  const [availableTools, setAvailableTools] = useState([]);
+  const [filter, setFilter] = useState('');
+
+  useEffect(() => {
+    axios.get('/api/tools/available')
+      .then(r => setAvailableTools(r.data))
+      .catch(() => {});
+  }, []);
+
+  const handleToggle = async (tool) => {
+    try {
+      await axios.patch(`/api/tools/${tool.id}`, { is_active: !tool.is_active });
+      fetchAll();
+    } catch (e) {
+      alert('Toggle failed: ' + (e.response?.data?.detail || e.message));
+    }
+  };
+
+  const filtered = tools.filter(t =>
+    t.name.toLowerCase().includes(filter.toLowerCase()) ||
+    t.description?.toLowerCase().includes(filter.toLowerCase()) ||
+    t.tool_type?.toLowerCase().includes(filter.toLowerCase())
+  );
+
+  const typeColor = (type) => {
+    if (type === 'cli') return 'primary';
+    if (type === 'mcp') return 'secondary';
+    if (type === 'function') return 'success';
+    return 'default';
+  };
+
+  return (
+    <Box>
+      <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+        <Typography variant="h6">Registered Tools</Typography>
+        <IconButton onClick={fetchAll}><Refresh /></IconButton>
+      </Box>
+
+      <TextField
+        size="small" fullWidth
+        placeholder="Filter by name, type, or description…"
+        value={filter}
+        onChange={e => setFilter(e.target.value)}
+        sx={{ mb: 2 }}
+      />
+
+      {filtered.length === 0 ? (
+        <Paper sx={{ p: 4, textAlign: 'center' }}>
+          <Build sx={{ fontSize: 48, color: 'text.disabled', mb: 1 }} />
+          <Typography color="text.secondary">No tools registered yet.</Typography>
+          <Typography variant="body2" color="text.secondary" mt={1}>
+            Ask Atlas to create a tool via Telegram, or use the Tool Factory agent.
+          </Typography>
+        </Paper>
+      ) : (
+        <Grid container spacing={2} sx={{ mb: 3 }}>
+          {filtered.map(t => (
+            <Grid item xs={12} md={6} lg={4} key={t.id}>
+              <Card sx={{ opacity: t.is_active ? 1 : 0.6 }}>
+                <CardContent>
+                  <Box display="flex" justifyContent="space-between" alignItems="flex-start" mb={1}>
+                    <Box>
+                      <Typography variant="h6" sx={{ fontSize: 15, fontWeight: 600 }}>{t.name}</Typography>
+                      <Box display="flex" gap={0.5} mt={0.5} flexWrap="wrap">
+                        <Chip label={t.tool_type} size="small" color={typeColor(t.tool_type)} />
+                        <Chip label={t.is_active ? 'active' : 'disabled'} size="small"
+                          color={t.is_active ? 'success' : 'default'} variant="outlined" />
+                        <Chip label={`used ${t.use_count}×`} size="small" variant="outlined" />
+                      </Box>
+                    </Box>
+                    <Tooltip title={t.is_active ? 'Disable tool' : 'Enable tool'}>
+                      <IconButton size="small" onClick={() => handleToggle(t)}
+                        color={t.is_active ? 'warning' : 'success'}>
+                        {t.is_active ? <PauseCircle fontSize="small" /> : <PlayCircle fontSize="small" />}
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                  <Typography variant="body2" color="text.secondary" sx={{ minHeight: 36 }}>
+                    {t.description}
+                  </Typography>
+                  <Typography variant="caption" color="text.disabled" display="block" mt={1}>
+                    Created by: {t.created_by}
+                    {t.last_used_at ? ` · last used ${new Date(t.last_used_at).toLocaleDateString()}` : ''}
+                  </Typography>
+                </CardContent>
+              </Card>
+            </Grid>
+          ))}
+        </Grid>
+      )}
+
+      {availableTools.length > 0 && (
+        <Box>
+          <Typography variant="subtitle1" fontWeight={600} mb={1}>
+            Available Plugins (on disk, not yet registered)
+          </Typography>
+          <List dense>
+            {availableTools.filter(at => !tools.find(t => t.name === at.name)).map(at => (
+              <ListItem key={at.name} divider>
+                <ListItemText
+                  primary={<Box display="flex" gap={1} alignItems="center">
+                    <Typography variant="body2">{at.name}</Typography>
+                    <Chip label={at.type} size="small" variant="outlined" />
+                  </Box>}
+                  secondary={at.description}
+                />
+              </ListItem>
+            ))}
+          </List>
+        </Box>
+      )}
     </Box>
   );
 }

@@ -70,6 +70,63 @@ def is_repair_approval_request(user_message: str) -> bool:
     return normalized in _APPROVAL_CUES
 
 
+_LOW_RISK_ACTIONS = frozenset({
+    "clear_redis_key",
+    "reinject_schedule",
+    "set_env_var",
+    "restart_service",
+    "clear_cache",
+})
+_MEDIUM_RISK_ACTIONS = frozenset({
+    "edit_config_file",
+    "update_yaml",
+    "update_json_config",
+})
+_CODE_EXTENSIONS = frozenset({".py", ".js", ".ts", ".sh", ".sql"})
+
+
+def classify_repair_risk(plan: dict) -> str:
+    """Classify a repair plan as 'low', 'medium', or 'high' risk.
+
+    Risk levels:
+    - low:    Only env var changes, Redis key clears, schedule re-injections.
+              No file writes at all. Safe to auto-apply.
+    - medium: Config file edits (.yaml, .json, .toml). Require human review.
+    - high:   Any source code edits (.py, .js, .ts) or unknown actions.
+              Always require human approval.
+
+    Args:
+        plan: The repair plan dict stored in RepairTicket.plan.
+              Expected keys: steps (list of {action, ...}), patches (list).
+
+    Returns:
+        'low' | 'medium' | 'high'
+    """
+    steps: list[dict] = plan.get("steps", []) or []
+    patches: list[dict] = plan.get("patches", []) or []
+
+    if patches:
+        for patch in patches:
+            file_path = patch.get("file", "") or ""
+            ext = Path(file_path).suffix.lower()
+            if ext in _CODE_EXTENSIONS:
+                return "high"
+            return "medium"
+
+    if not steps:
+        return "high"
+
+    for step in steps:
+        action = (step.get("action") or "").lower()
+        if action in _LOW_RISK_ACTIONS:
+            continue
+        if action in _MEDIUM_RISK_ACTIONS:
+            return "medium"
+        return "high"
+
+    return "low"
+
+
 def _resolve_repo_path(path: str, *, allow_missing: bool = False) -> Path:
     raw = (path or ".").strip()
     candidate = (REPO_ROOT / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
@@ -241,6 +298,35 @@ async def store_repair_plan(
         "verification_commands": commands,
         "created_at": time.time(),
     }
+    # Create or update a durable RepairTicket so the plan appears in the dashboard
+    try:
+        from src.db.session import async_session
+        from src.db.models import RepairTicket, User
+        async with async_session() as session:
+            user_result = await session.execute(select(User).where(User.telegram_id == user_id))
+            user = user_result.scalar_one_or_none()
+            ticket = RepairTicket(
+                user_id=user.id if user else None,
+                title=description[:200] or "Code repair",
+                source="telegram",
+                status="plan_ready",
+                priority="medium",
+                error_context=None,
+                plan={
+                    "file_path": declared_path,
+                    "affected_files": patch_paths,
+                    "verification_commands": commands,
+                },
+                approval_required=True,
+            )
+            session.add(ticket)
+            await session.commit()
+            await session.refresh(ticket)
+            payload["ticket_id"] = ticket.id
+    except Exception:
+        # Non-fatal: we still proceed with pending repair in Redis
+        pass
+
     await store_pending_repair(user_id, payload)
     return payload
 
@@ -324,7 +410,7 @@ async def _run_verification_commands(commands: list[str]) -> list[dict]:
 
 
 async def execute_pending_repair(user_telegram_id: int) -> str:
-    """Apply the stored patch in a sandbox branch, verify, then merge to main.
+    """Apply the stored patch in a sandbox branch, verify, and wait for deploy approval.
 
     Pipeline:
     1. Create a repair branch from current HEAD
@@ -404,39 +490,65 @@ async def execute_pending_repair(user_telegram_id: int) -> str:
                 "repair agent analyze the failure and try a revised approach."
             )
 
-        # Verification passed → merge to main
+        # Verification passed → persist ticket status and wait for deploy approval
         await _run_command_parts(["git", "checkout", original_branch])
-        merge_rc, merge_out, merge_err = await _run_command_parts(["git", "merge", "--ff-only", branch_name])
-        if merge_rc != 0:
-            # Non-fast-forward — try regular merge
-            merge_rc, merge_out, merge_err = await _run_command_parts([
-                "git", "merge", branch_name, "-m",
-                f"repair: merge {branch_name}",
-            ])
-        if merge_rc != 0:
-            return f"Patch verified but merge failed:\n\n{_truncate(merge_err or merge_out)}"
 
-        # Clean up branch
-        await _run_command_parts(["git", "branch", "-d", branch_name])
+        try:
+            from src.db.session import async_session
+            from src.db.models import RepairTicket, User
+            async with async_session() as session:
+                ticket_id = payload.get("ticket_id")
+                # Map telegram to user.id
+                user_row = None
+                user_result = await session.execute(select(User).where(User.telegram_id == user_telegram_id))
+                user_row = user_result.scalar_one_or_none()
+                if ticket_id:
+                    ticket = await session.get(RepairTicket, ticket_id)
+                else:
+                    ticket = None
+                if ticket is None:
+                    # Create a ticket if one wasn't created earlier
+                    ticket = RepairTicket(
+                        user_id=user_row.id if user_row else None,
+                        title=(payload.get("description") or "Code repair")[:200],
+                        source="telegram",
+                        status="ready_for_deploy",
+                        priority="medium",
+                        plan={
+                            "file_path": payload.get("file_path"),
+                            "affected_files": payload.get("affected_files", []),
+                            "verification_commands": payload.get("verification_commands", []),
+                        },
+                        branch_name=branch_name,
+                        verification_results={"results": verification_results},
+                        approval_required=True,
+                    )
+                    session.add(ticket)
+                else:
+                    ticket.status = "ready_for_deploy"
+                    ticket.branch_name = branch_name
+                    ticket.verification_results = {"results": verification_results}
+                await session.commit()
+        except Exception:
+            # Non-fatal for chat flow
+            pass
+
         await clear_pending_repair(user_telegram_id)
 
         summary_lines = [
-            "## ✅ Repair Applied & Verified",
+            "## ✅ Patch Verified in Sandbox — Awaiting Deploy Approval",
             "",
+            f"Branch: `{branch_name}` (not merged)",
             f"**Files:** {', '.join(f'`{f}`' for f in affected)}",
             f"**Summary:** {payload['description']}",
+            "",
+            "Use /ticket approve <id> or the dashboard to deploy this patch.",
         ]
         if verification_results:
             summary_lines.append("")
             summary_lines.append("**Verification:**")
             for item in verification_results:
                 summary_lines.append(f"- `{item['command']}` → exit {item['returncode']}")
-
-        # Trigger Docker rebuild if running in container
-        deploy_note = await _maybe_trigger_deploy()
-        if deploy_note:
-            summary_lines.append("")
-            summary_lines.append(deploy_note)
 
         return "\n".join(summary_lines)
     finally:
@@ -497,3 +609,45 @@ async def maybe_handle_pending_repair(user_telegram_id: int, user_message: str) 
         f"{challenge['prompt']}\n\n"
         "Reply with the answer to apply the pending repair patch."
     )
+
+
+async def approve_ticket_deploy(ticket_id: int, approver_telegram_id: int) -> str:
+    """Merge a verified repair branch to main after owner approval and write deploy signal."""
+    from src.db.session import async_session
+    from src.db.models import RepairTicket, User
+
+    async with async_session() as session:
+        ticket = await session.get(RepairTicket, ticket_id)
+        if ticket is None:
+            return "Ticket not found."
+        if ticket.status != "ready_for_deploy" or not ticket.branch_name:
+            return "Ticket is not ready for deploy or branch missing. Run verification first."
+
+        # Approver lookup
+        user_result = await session.execute(select(User).where(User.telegram_id == approver_telegram_id))
+        approver = user_result.scalar_one_or_none()
+
+        # Merge flow
+        original_branch = None
+        rc, stdout, _ = await _run_command_parts(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        original_branch = stdout.strip() if rc == 0 else "main"
+        await _run_command_parts(["git", "checkout", original_branch])
+        merge_rc, merge_out, merge_err = await _run_command_parts(["git", "merge", "--ff-only", ticket.branch_name])
+        if merge_rc != 0:
+            merge_rc, merge_out, merge_err = await _run_command_parts([
+                "git", "merge", ticket.branch_name, "-m", f"repair: merge {ticket.branch_name}",
+            ])
+        if merge_rc != 0:
+            return f"Deploy failed during merge: {_truncate(merge_err or merge_out)}"
+
+        # Clean up branch
+        await _run_command_parts(["git", "branch", "-d", ticket.branch_name])
+        ticket.status = "deployed"
+        ticket.approved_by = approver.id if approver else None
+        from datetime import datetime, timezone
+        ticket.approved_at = datetime.now(timezone.utc)
+        ticket.deployed_at = ticket.approved_at
+        await session.commit()
+
+    note = await _maybe_trigger_deploy()
+    return ("✅ Deploy completed. " + (note or ""))

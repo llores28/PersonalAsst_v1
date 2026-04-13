@@ -2227,6 +2227,73 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
         await _add_direct_response_to_session(user_telegram_id, user_message, direct_google_tasks_response)
         return direct_google_tasks_response
 
+    # ── M2: Autonomous background job (monitor/watch requests) ────────
+    try:
+        from src.agents.background_job import is_background_job_request, create_background_job
+        if is_background_job_request(user_message) and user_db_id:
+            _interval = 600
+            _max_iter = 48
+            _done_cond = None
+            _lowered = user_message.lower()
+            if "every minute" in _lowered:
+                _interval = 60
+            elif "every 5 min" in _lowered:
+                _interval = 300
+            elif "every hour" in _lowered or "hourly" in _lowered:
+                _interval = 3600
+            if "until " in _lowered:
+                _idx = _lowered.index("until ")
+                _done_cond = user_message[_idx + 6:].strip()
+            job_info = await create_background_job(
+                user_telegram_id=user_telegram_id,
+                user_db_id=user_db_id,
+                goal=user_message,
+                done_condition=_done_cond,
+                check_interval_seconds=_interval,
+                max_iterations=_max_iter,
+            )
+            _interval_label = f"{_interval // 60} min" if _interval >= 60 else f"{_interval}s"
+            response_text = (
+                f"✅ Background job started (ID #{job_info['id']}).\n\n"
+                f"**Goal:** {user_message}\n"
+                + (f"**Stop when:** {_done_cond}\n" if _done_cond else "")
+                + f"**Check interval:** every {_interval_label}\n"
+                f"**Max iterations:** {_max_iter}\n\n"
+                "I'll run this in the background and notify you when done or if anything important comes up. "
+                "You can cancel it from the Dashboard → Background Jobs tab or say `/cancel`."
+            )
+            await add_turn(user_telegram_id, "assistant", response_text)
+            await _add_direct_response_to_session(user_telegram_id, user_message, response_text)
+            return response_text
+    except Exception as _bge:
+        logger.warning("Background job detection failed, continuing normally: %s", _bge)
+
+    # ── M1: Parallel multi-domain fan-out ─────────────────────────────
+    try:
+        from src.agents.routing_hardened import detect_parallel_domains
+        _parallel_domains = detect_parallel_domains(user_message)
+        if _parallel_domains:
+            from src.agents.parallel_runner import ParallelTask, run_parallel_tasks
+            _tasks = [
+                ParallelTask(domain=d["domain"], prompt=d["prompt"])
+                for d in _parallel_domains
+            ]
+            logger.info(
+                "Parallel fan-out: %d branches detected for user %d — domains: %s",
+                len(_tasks), user_telegram_id,
+                [t.domain for t in _tasks],
+            )
+            response_text = await run_parallel_tasks(_tasks, user_telegram_id, user_name)
+            await add_turn(user_telegram_id, "assistant", response_text)
+            await _add_direct_response_to_session(user_telegram_id, user_message, response_text)
+            import asyncio
+            asyncio.create_task(
+                _run_reflector_background(user_message, response_text, str(user_telegram_id))
+            )
+            return response_text
+    except Exception as _pe:
+        logger.warning("Parallel fan-out detection failed, falling through to single agent: %s", _pe)
+
     # Create orchestrator with dynamic persona (Mem0 + conversation context)
     complexity = _classify_message_complexity(user_message)
     agent = await create_orchestrator_async(
@@ -2260,6 +2327,108 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
             context={"user_message": user_message},
         )
         response_text = result.final_output
+
+        # ── Record cost for this turn ──────────────────────────────────
+        try:
+            _usage = getattr(result, "usage", None)
+            if _usage and user_db_id:
+                _in_tok = getattr(_usage, "input_tokens", 0) or 0
+                _out_tok = getattr(_usage, "output_tokens", 0) or 0
+                _total_tok = _in_tok + _out_tok
+                # Price lookup by model (per 1M tokens; rough mid-tier defaults)
+                _model_id = agent.model if hasattr(agent, "model") else ""
+                if "mini" in str(_model_id):
+                    _cost = (_in_tok * 0.15 + _out_tok * 0.60) / 1_000_000
+                elif "nano" in str(_model_id):
+                    _cost = (_in_tok * 0.075 + _out_tok * 0.30) / 1_000_000
+                else:
+                    _cost = (_in_tok * 2.50 + _out_tok * 10.00) / 1_000_000
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+                from src.db.session import async_session as _async_session
+                from src.db.models import DailyCost as _DailyCost
+                from datetime import date as _date
+                async with _async_session() as _cs:
+                    _stmt = pg_insert(_DailyCost).values(
+                        date=_date.today(),
+                        user_id=user_db_id,
+                        total_tokens=_total_tok,
+                        total_cost_usd=_cost,
+                        request_count=1,
+                    ).on_conflict_do_update(
+                        index_elements=["date", "user_id"],
+                        set_={
+                            "total_tokens": _DailyCost.total_tokens + _total_tok,
+                            "total_cost_usd": _DailyCost.total_cost_usd + _cost,
+                            "request_count": _DailyCost.request_count + 1,
+                        },
+                    )
+                    await _cs.execute(_stmt)
+                    await _cs.commit()
+                logger.debug("Cost recorded: $%.6f (%d tokens) for user %s", _cost, _total_tok, user_db_id)
+        except Exception as _ce:
+            logger.debug("Cost tracking failed (non-critical): %s", _ce)
+
+        # ── Record step-by-step thought trace (M3 observability) ──────
+        try:
+            _new_items = getattr(result, "new_items", None) or []
+            if _new_items:
+                from src.db.session import async_session as _async_session
+                from src.db.models import AgentTrace as _AgentTrace
+                import time as _time_mod
+                _session_key = f"agent_session:{user_telegram_id}"
+                _call_timestamps: dict[str, float] = {}
+                _trace_rows: list[_AgentTrace] = []
+                _step = 0
+                for _item in _new_items:
+                    _item_type = type(_item).__name__
+                    if _item_type in ("FunctionCallItem", "ToolCallItem"):
+                        _call_id = getattr(_item, "call_id", None) or getattr(_item, "id", "")
+                        _call_timestamps[_call_id] = _time_mod.time()
+                        _tool = (
+                            getattr(_item, "name", None)
+                            or getattr(_item, "tool_name", None)
+                            or _item_type
+                        )
+                        _raw_args = getattr(_item, "arguments", None) or getattr(_item, "input", None)
+                        _args_dict: dict | None = None
+                        if isinstance(_raw_args, dict):
+                            _args_dict = _raw_args
+                        elif isinstance(_raw_args, str):
+                            try:
+                                import json as _json
+                                _args_dict = _json.loads(_raw_args)
+                            except Exception:
+                                _args_dict = {"raw": _raw_args[:500]}
+                        _agent_name_trace = (
+                            getattr(getattr(_item, "agent", None), "name", None)
+                            or (agent.name if hasattr(agent, "name") else None)
+                        )
+                        _trace_rows.append(_AgentTrace(
+                            session_key=_session_key,
+                            step_index=_step,
+                            agent_name=_agent_name_trace,
+                            tool_name=_tool,
+                            tool_args=_args_dict,
+                        ))
+                        _step += 1
+                    elif _item_type in ("FunctionCallOutputItem", "ToolCallOutputItem"):
+                        _call_id = getattr(_item, "call_id", None) or ""
+                        _start_ts = _call_timestamps.pop(_call_id, None)
+                        _dur = int((_time_mod.time() - _start_ts) * 1000) if _start_ts else None
+                        _output = getattr(_item, "output", None) or ""
+                        _preview = str(_output)[:200] if _output else None
+                        if _trace_rows:
+                            _trace_rows[-1].tool_result_preview = _preview
+                            _trace_rows[-1].duration_ms = _dur
+
+                if _trace_rows:
+                    async with _async_session() as _ts:
+                        _ts.add_all(_trace_rows)
+                        await _ts.commit()
+                    logger.debug("Agent trace: %d steps recorded for session %s", len(_trace_rows), _session_key)
+        except Exception as _te:
+            logger.debug("Trace recording failed (non-critical): %s", _te)
+
         last_agent = getattr(result, "last_agent", None)
         last_agent_name = getattr(last_agent, "name", "")
         if (
@@ -2273,7 +2442,7 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
 
         await _maybe_store_pending_connected_gmail_send(user_telegram_id, user_message, response_text)
 
-        # Capture tool errors for context-aware repair routing
+        # Capture tool/skill/agent errors for repair routing and durable audit
         if _response_has_tool_error(response_text):
             import time as _time
             from src.memory.conversation import store_last_tool_error
@@ -2283,6 +2452,27 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
                 "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
             })
             logger.info("Stored tool error context for user %s (repair agent can access it)", user_telegram_id)
+
+            # Also persist to Postgres for durable debugging via dashboard/agents
+            try:
+                from src.db.session import async_session as _async_session
+                from src.db.models import AuditLog as _AuditLog
+                async with _async_session() as _session:
+                    _session.add(_AuditLog(
+                        user_id=user_db_id or None,
+                        direction="outbound",
+                        platform="telegram",
+                        agent_name="orchestrator",
+                        message_text="Tool/skill/agent error detected in assistant response",
+                        tools_used={
+                            "error": True,
+                            "user_message": user_message,
+                            "assistant_response": response_text[:1000],
+                        },
+                    ))
+                    await _session.commit()
+            except Exception as _e:
+                logger.debug("Failed to persist error audit log (non-critical): %s", _e)
 
         # Record assistant response in conversation session (state management)
         await add_turn(user_telegram_id, "assistant", response_text)

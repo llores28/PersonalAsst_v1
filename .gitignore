@@ -26,6 +26,14 @@ ENV/
 *.swo
 *~
 
+# Windsurf IDE metadata (local only)
+.windsurf/
+
+# Bootstrap dev tooling (keep locally, don't publish)
+bootstrap/
+bootstrap-backup*/
+bootstrap_backup*/
+
 # Docker volumes (local data)
 postgres_data/
 qdrant_data/
@@ -48,6 +56,20 @@ desktop.ini
 
 # Tool outputs
 tools/*/output/
+
+# Frontend build artifacts
+orchestration-ui/node_modules/
+orchestration-ui/build/
+
+# Temp / cache dirs
+.tmp/
+.benchmarks/
+.cache/
+.ruff_cache/
+.mypy_cache/
+
+# Personal data files
+gmail-filters.xml
 
 # Misc
 *.log

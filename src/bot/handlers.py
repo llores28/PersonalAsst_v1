@@ -42,14 +42,22 @@ async def _process_user_queue(user_id: int) -> None:
             logger.error("Handler timeout for user %d", user_id)
             try:
                 await message.answer("That took too long. Please try again.")
-            except Exception:
-                pass
+            except Exception as notify_error:
+                logger.warning(
+                    "Failed to send timeout notice for user %d: %s",
+                    user_id,
+                    notify_error,
+                )
         except Exception as e:
             logger.exception("Handler error for user %d: %s", user_id, e)
             try:
                 await message.answer("Something unexpected happened. I've logged it.")
-            except Exception:
-                pass
+            except Exception as notify_error:
+                logger.warning(
+                    "Failed to send error notice for user %d: %s",
+                    user_id,
+                    notify_error,
+                )
         finally:
             queue.task_done()
 
@@ -262,8 +270,12 @@ async def _handle_persona_interview(message: Message, user, args: list[str]) -> 
         await set_session_field(
             telegram_id, "interview_session", str(state["current_session"])
         )
-    except Exception:
-        pass  # Graceful degradation if Redis unavailable
+    except Exception as e:
+        logger.warning(
+            "Failed to set interview session fields for user %d: %s",
+            telegram_id,
+            e,
+        )
 
     # Get the first question of the session
     response = await handle_interview_message(telegram_id, "__START__")
@@ -710,6 +722,34 @@ async def cmd_schedules(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
 
+@router.message(Command("ticket"))
+async def cmd_ticket(message: Message) -> None:
+    """Handle /ticket approve <id> — approve a verified repair ticket for deploy."""
+    if not await is_allowed(message.from_user.id):
+        return
+
+    parts = (message.text or "").split(maxsplit=2)
+    sub = parts[1].lower() if len(parts) > 1 else None
+    arg = parts[2] if len(parts) > 2 else None
+
+    if sub == "approve" and arg:
+        try:
+            ticket_id = int(arg)
+        except ValueError:
+            await message.answer("Ticket ID must be a number.")
+            return
+        from src.repair.engine import approve_ticket_deploy
+        resp = await approve_ticket_deploy(ticket_id, message.from_user.id)
+        await message.answer(resp, parse_mode="Markdown")
+        return
+
+    await message.answer(
+        "Usage:\n\n"
+        "• `/ticket approve <id>` — Merge verified ticket branch and deploy",
+        parse_mode="Markdown",
+    )
+
+
 @router.message(Command("connect"))
 async def cmd_connect(message: Message) -> None:
     """Handle /connect google — start OAuth flow."""
@@ -1065,6 +1105,153 @@ async def cmd_skills(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
 
+@router.message(Command("orgs"))
+async def cmd_orgs(message: Message) -> None:
+    """Handle /orgs — manage organizations and launch creation wizard."""
+    if not await is_allowed(message.from_user.id):
+        return
+
+    args = message.text.split(maxsplit=2) if message.text else []
+    subcommand = args[1].lower() if len(args) > 1 else "list"
+    arg = args[2].strip() if len(args) > 2 else None
+
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import User, AuditLog
+    from src.orchestration.agent_registry import Organization, OrgActivity
+    from src.memory.conversation import set_session_field
+
+    async with async_session() as session:
+        user_result = await session.execute(
+            select(User).where(User.telegram_id == message.from_user.id)
+        )
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            await message.answer("I couldn't find your local user record yet.")
+            return
+
+        if subcommand == "create":
+            await set_session_field(message.from_user.id, "org_creation_active", "true")
+            await set_session_field(message.from_user.id, "org_creation_step", "name")
+            await message.answer(
+                "🏢 **Organization Creation Wizard**\n\n"
+                "Let's create a new organization.\n\n"
+                "Step 1 of 3: What should the organization be called?",
+                parse_mode="Markdown",
+            )
+            return
+
+        if subcommand in ("pause", "resume", "delete", "info") and not arg:
+            await message.answer(f"Usage: `/orgs {subcommand} <org_id>`", parse_mode="Markdown")
+            return
+
+        if subcommand in ("pause", "resume", "delete", "info"):
+            try:
+                org_id = int(arg)
+            except (TypeError, ValueError):
+                await message.answer("Organization ID must be a number.")
+                return
+
+            org_result = await session.execute(
+                select(Organization).where(
+                    Organization.id == org_id,
+                    Organization.owner_user_id == user.id,
+                )
+            )
+            org = org_result.scalar_one_or_none()
+            if not org:
+                await message.answer(f"Organization `{org_id}` not found.", parse_mode="Markdown")
+                return
+
+            if subcommand == "info":
+                await message.answer(
+                    "\n".join([
+                        f"🏢 **{org.name}**",
+                        f"",
+                        f"**ID:** `{org.id}`",
+                        f"**Status:** {org.status}",
+                        f"**Goal:** {org.goal or 'None'}",
+                        f"**Description:** {org.description or 'None'}",
+                    ]),
+                    parse_mode="Markdown",
+                )
+                return
+
+            if subcommand == "pause":
+                org.status = "paused"
+                session.add(OrgActivity(
+                    org_id=org.id,
+                    action="org_paused",
+                    details="Organization paused via Telegram",
+                    source="telegram",
+                ))
+                await session.commit()
+                await message.answer(f"⏸️ Organization `{org.name}` paused.", parse_mode="Markdown")
+                return
+
+            if subcommand == "resume":
+                org.status = "active"
+                session.add(OrgActivity(
+                    org_id=org.id,
+                    action="org_resumed",
+                    details="Organization resumed via Telegram",
+                    source="telegram",
+                ))
+                await session.commit()
+                await message.answer(f"▶️ Organization `{org.name}` resumed.", parse_mode="Markdown")
+                return
+
+            if subcommand == "delete":
+                org_name = org.name
+                session.add(AuditLog(
+                    user_id=user.id,
+                    direction="outbound",
+                    platform="telegram",
+                    message_text=f"Organization deleted: {org_name} ({org.id})",
+                    agent_name="org_telegram",
+                    tools_used={"action": "org_deleted", "org_id": org.id, "org_name": org_name},
+                ))
+                await session.delete(org)
+                await session.commit()
+                await message.answer(f"🗑️ Organization `{org_name}` deleted.", parse_mode="Markdown")
+                return
+
+        orgs_result = await session.execute(
+            select(Organization)
+            .where(Organization.owner_user_id == user.id)
+            .order_by(Organization.created_at.desc())
+        )
+        orgs = orgs_result.scalars().all()
+
+    if not orgs:
+        await message.answer(
+            "🏢 **Organizations**\n\n"
+            "You don't have any organizations yet.\n\n"
+            "Use `/orgs create` to start the wizard.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = ["🏢 **Your Organizations**\n"]
+    for org in orgs:
+        status_icon = "🟢" if org.status == "active" else "⏸️"
+        lines.append(f"{status_icon} `{org.id}` - {org.name}")
+        if org.goal:
+            lines.append(f"   Goal: {org.goal}")
+
+    lines.extend([
+        "",
+        "**Commands:**",
+        "• `/orgs create` - New organization",
+        "• `/orgs info <id>` - Details",
+        "• `/orgs pause <id>` - Deactivate",
+        "• `/orgs resume <id>` - Reactivate",
+        "• `/orgs delete <id>` - Delete",
+    ])
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
 @router.message()
 async def handle_message(message: Message) -> None:
     """Handle all non-command messages — route to orchestrator (text + voice)."""
@@ -1109,8 +1296,95 @@ async def handle_message(message: Message) -> None:
                 await delete_session_field(message.from_user.id, "interview_active")
                 await delete_session_field(message.from_user.id, "interview_session")
             return
-    except Exception:
-        pass  # Graceful degradation — fall through to normal routing
+    except Exception as e:
+        logger.warning(
+            "Interview session routing failed for user %d; falling back to normal routing: %s",
+            message.from_user.id,
+            e,
+        )
+
+    # Check if user is in organization creation mode
+    try:
+        from src.memory.conversation import get_session_field, delete_session_field, set_session_field
+        from sqlalchemy import select
+        from src.db.session import async_session
+        from src.db.models import User
+        from src.orchestration.agent_registry import Organization, OrgActivity
+
+        org_creation_active = await get_session_field(message.from_user.id, "org_creation_active")
+        if org_creation_active == "true":
+            step = await get_session_field(message.from_user.id, "org_creation_step") or "name"
+
+            if step == "name":
+                await set_session_field(message.from_user.id, "org_creation_name", message.text.strip())
+                await set_session_field(message.from_user.id, "org_creation_step", "goal")
+                await message.answer(
+                    "Great. Step 2 of 3: What is this organization trying to accomplish?",
+                    parse_mode="Markdown",
+                )
+                return
+
+            if step == "goal":
+                await set_session_field(message.from_user.id, "org_creation_goal", message.text.strip())
+                await set_session_field(message.from_user.id, "org_creation_step", "description")
+                await message.answer(
+                    "Step 3 of 3: Add an optional description, or reply `skip`.",
+                    parse_mode="Markdown",
+                )
+                return
+
+            if step == "description":
+                name = await get_session_field(message.from_user.id, "org_creation_name")
+                goal = await get_session_field(message.from_user.id, "org_creation_goal")
+                description = None if message.text.strip().lower() == "skip" else message.text.strip()
+
+                async with async_session() as session:
+                    user_result = await session.execute(
+                        select(User).where(User.telegram_id == message.from_user.id)
+                    )
+                    user = user_result.scalar_one_or_none()
+                    if not user:
+                        await message.answer("I couldn't find your local user record yet.")
+                    else:
+                        org = Organization(
+                            name=name or "Untitled Organization",
+                            goal=goal,
+                            description=description,
+                            owner_user_id=user.id,
+                            status="active",
+                        )
+                        session.add(org)
+                        await session.flush()
+                        session.add(OrgActivity(
+                            org_id=org.id,
+                            action="org_created",
+                            details=f"Organization '{org.name}' created via Telegram wizard",
+                            source="telegram",
+                        ))
+                        await session.commit()
+                        await session.refresh(org)
+                        await message.answer(
+                            "\n".join([
+                                "✅ **Organization created**",
+                                "",
+                                f"**Name:** {org.name}",
+                                f"**ID:** `{org.id}`",
+                                f"**Goal:** {org.goal or 'None'}",
+                            ]),
+                            parse_mode="Markdown",
+                        )
+
+                await delete_session_field(message.from_user.id, "org_creation_active")
+                await delete_session_field(message.from_user.id, "org_creation_step")
+                await delete_session_field(message.from_user.id, "org_creation_name")
+                await delete_session_field(message.from_user.id, "org_creation_goal")
+                return
+    except Exception as e:
+        logger.warning(
+            "Organization creation routing failed for user %d; falling back to normal routing: %s",
+            message.from_user.id,
+            e,
+        )
 
     # Check if user is in skill creation mode
     try:
@@ -1129,8 +1403,12 @@ async def handle_message(message: Message) -> None:
                 await delete_session_field(message.from_user.id, "skill_creation_active")
                 await delete_session_field(message.from_user.id, "skill_creation_state")
             return
-    except Exception:
-        pass  # Graceful degradation
+    except Exception as e:
+        logger.warning(
+            "Skill creation routing failed for user %d; falling back to normal routing: %s",
+            message.from_user.id,
+            e,
+        )
 
     embedded_command = _extract_embedded_command(message.text)
     if embedded_command:

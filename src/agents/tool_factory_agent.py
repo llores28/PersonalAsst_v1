@@ -84,8 +84,7 @@ Every CLI tool must:
 """
 
 
-@function_tool
-async def generate_cli_tool(
+async def _generate_cli_tool_impl(
     name: str,
     description: str,
     parameters_json: str,
@@ -193,6 +192,35 @@ async def generate_cli_tool(
         f"**Location:** src/tools/plugins/{name}/\n"
         f"**Sandbox test:** {test_msg}\n\n"
         "The tool is now available for use. The orchestrator will pick it up automatically."
+    )
+
+
+@function_tool
+async def generate_cli_tool(
+    name: str,
+    description: str,
+    parameters_json: str,
+    tool_code: str,
+    requires_network: bool = False,
+    allowed_hosts: str = "",
+) -> str:
+    """Generate and register a new CLI tool.
+
+    Args:
+        name: Tool name in snake_case (e.g. 'stock_checker')
+        description: What the tool does
+        parameters_json: JSON string of parameter definitions: {"param_name": {"type": "str", "required": true, "description": "..."}}
+        tool_code: The complete Python CLI script code (must use argparse)
+        requires_network: Whether the tool needs network access
+        allowed_hosts: Comma-separated list of allowed hostnames for network access
+    """
+    return await _generate_cli_tool_impl(
+        name=name,
+        description=description,
+        parameters_json=parameters_json,
+        tool_code=tool_code,
+        requires_network=requires_network,
+        allowed_hosts=allowed_hosts,
     )
 
 

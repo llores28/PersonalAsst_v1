@@ -112,7 +112,89 @@ class Tool(Base):
     )
     created_by: Mapped[str] = mapped_column(String(50), default="tool_factory")
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
-    use_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class RepairTicket(Base):
+    """Represents a repair ticket created from an error analysis and fix plan.
+
+    Lifecycle: open → plan_ready → verifying → verification_failed → ready_for_deploy → deployed/closed
+    """
+    __tablename__ = "repair_tickets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    source: Mapped[str] = mapped_column(String(20), default="telegram")  # telegram|scheduler|dashboard
+    status: Mapped[str] = mapped_column(String(30), default="open")
+    priority: Mapped[str] = mapped_column(String(10), default="medium")
+    risk_level: Mapped[str] = mapped_column(String(10), default="high")  # low|medium|high
+    auto_applied: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Context and artifacts
+    error_context: Mapped[Optional[dict]] = mapped_column(JSONB)
+    plan: Mapped[Optional[dict]] = mapped_column(JSONB)
+    branch_name: Mapped[Optional[str]] = mapped_column(String(120))
+    verification_results: Mapped[Optional[dict]] = mapped_column(JSONB)
+
+    # Approvals and deployment
+    approval_required: Mapped[bool] = mapped_column(Boolean, default=True)
+    approved_by: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"))
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    deployed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class AgentTrace(Base):
+    """Step-by-step tool-call trace for a single orchestrator turn.
+
+    One row per tool call. Linked to the audit_log entry for the turn.
+    Populated from result.new_items after Runner.run().
+    """
+    __tablename__ = "agent_traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    audit_log_id: Mapped[Optional[int]] = mapped_column(ForeignKey("audit_log.id"))
+    session_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    step_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    agent_name: Mapped[Optional[str]] = mapped_column(String(100))
+    tool_name: Mapped[Optional[str]] = mapped_column(String(150))
+    tool_args: Mapped[Optional[dict]] = mapped_column(JSONB)
+    tool_result_preview: Mapped[Optional[str]] = mapped_column(Text)
+    duration_ms: Mapped[Optional[int]] = mapped_column(Integer)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class BackgroundJob(Base):
+    """Autonomous multi-step background agent job.
+
+    Created when user says 'keep watching / monitor X until Y'.
+    APScheduler ticks run an agent turn each interval until done_condition
+    is met or max_iterations is reached.
+    """
+    __tablename__ = "background_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    done_condition: Mapped[Optional[str]] = mapped_column(Text)
+    check_interval_seconds: Mapped[int] = mapped_column(Integer, default=600)
+    max_iterations: Mapped[int] = mapped_column(Integer, default=48)
+    iterations_run: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="running")  # running|done|cancelled|failed
+    result: Mapped[Optional[str]] = mapped_column(Text)
+    apscheduler_id: Mapped[Optional[str]] = mapped_column(String(200), unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
 
 class ScheduledTask(Base):

@@ -12,7 +12,6 @@ Design principles (research-backed):
 - Activity log every mutation so the dashboard stays in sync
 """
 
-import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -77,6 +76,25 @@ async def _get_owned_org(session, org_id: int, owner_id: int) -> Organization | 
     if org is None or org.owner_user_id != owner_id:
         return None
     return org
+
+
+async def _find_owned_orgs_by_name(
+    session,
+    owner_id: int,
+    query: str,
+) -> list[Organization]:
+    """Find owned organizations by partial name match, newest first."""
+    search = (query or "").strip()
+    if not search:
+        return []
+
+    result = await session.execute(
+        select(Organization)
+        .where(Organization.owner_user_id == owner_id)
+        .where(Organization.name.ilike(f"%{search}%"))
+        .order_by(Organization.created_at.desc())
+    )
+    return list(result.scalars().all())
 
 
 def _agent_display(agents_by_id: dict[int, OrgAgent], agent_id: int | None) -> str:
@@ -147,6 +165,42 @@ def _build_bound_org_tools(user_id: int) -> list:
                 f"  Goal: {org.goal or '(none set)'}\n"
                 f"  Agents: {ac}, Tasks: {tc} ({atc} active)"
             )
+        return "\n".join(lines)
+
+    @function_tool(
+        name_override="find_organization",
+        failure_error_function=_org_tool_error,
+        timeout=15,
+    )
+    async def find_organization(name_query: str) -> str:
+        """Find an organization by name and return the best matching ID(s).
+
+        Args:
+            name_query: Full or partial organization name, e.g. 'DevOps'
+        """
+        if not name_query or not name_query.strip():
+            return "Provide part of the organization name so I can find the correct org ID."
+
+        async with async_session() as session:
+            matches = await _find_owned_orgs_by_name(session, user_id, name_query)
+
+        if not matches:
+            return (
+                f"I couldn't find an organization matching '{name_query.strip()}'. "
+                "Use `list_organizations` to see your available orgs and IDs."
+            )
+
+        if len(matches) == 1:
+            org = matches[0]
+            return (
+                f"Matched organization **{org.name}** with ID `{org.id}`. "
+                "Use that org ID for follow-up task, agent, or tool actions."
+            )
+
+        lines = [f"I found {len(matches)} organizations matching '{name_query.strip()}':\n"]
+        for org in matches[:10]:
+            lines.append(f"- **{org.name}** (ID: `{org.id}`) — status: {org.status}")
+        lines.append("Reply with the org ID you want me to use.")
         return "\n".join(lines)
 
     @function_tool(
@@ -325,6 +379,8 @@ def _build_bound_org_tools(user_id: int) -> list:
         role: str,
         description: Optional[str] = None,
         instructions: Optional[str] = None,
+        skills: Optional[str] = None,
+        allowed_tools: Optional[str] = None,
     ) -> str:
         """Add a specialized agent to an organization.
 
@@ -334,11 +390,20 @@ def _build_bound_org_tools(user_id: int) -> list:
             role: Agent role (e.g., 'researcher', 'writer', 'analyst')
             description: What this agent does
             instructions: Specific instructions for this agent's behavior
+            skills: Comma-separated skill names this agent should use (e.g., 'code_audit,scheduler_diagnostics')
+            allowed_tools: Comma-separated tool names this agent may call (e.g., 'browser_scrape_page,linkedin_scrape_page')
         """
         async with async_session() as session:
             org = await _get_owned_org(session, org_id, user_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
+
+            # Build tools_config from skills and allowed_tools if provided
+            tc: dict = {}
+            if skills:
+                tc["skills"] = [s.strip() for s in skills.split(",") if s.strip()]
+            if allowed_tools:
+                tc["allowed_tools"] = [t.strip() for t in allowed_tools.split(",") if t.strip()]
 
             agent = OrgAgent(
                 org_id=org_id,
@@ -346,6 +411,7 @@ def _build_bound_org_tools(user_id: int) -> list:
                 role=role.strip(),
                 description=description,
                 instructions=instructions,
+                tools_config=tc if tc else None,
                 status="active",
             )
             session.add(agent)
@@ -356,9 +422,11 @@ def _build_bound_org_tools(user_id: int) -> list:
                 agent_id=agent.id,
             )
             await session.commit()
+            skills_note = f"\nSkills: {', '.join(tc['skills'])}" if tc.get("skills") else ""
+            tools_note = f"\nAllowed tools: {', '.join(tc['allowed_tools'])}" if tc.get("allowed_tools") else ""
             return (
                 f"Added agent **{name}** (role: {role}) to **{org.name}**.\n"
-                f"Agent ID: {agent.id}"
+                f"Agent ID: {agent.id}{skills_note}{tools_note}"
             )
 
     # ── CRUD: Tasks ──────────────────────────────────────────────────
@@ -733,18 +801,15 @@ def _build_bound_org_tools(user_id: int) -> list:
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
-        from src.agents.tool_factory_agent import generate_cli_tool
+        from src.agents.tool_factory_agent import _generate_cli_tool_impl
 
-        result = await generate_cli_tool.on_invoke_tool(
-            None,  # context
-            json.dumps({
-                "name": name,
-                "description": f"[{org.name}] {description}",
-                "parameters_json": parameters_json,
-                "tool_code": tool_code,
-                "requires_network": requires_network,
-                "allowed_hosts": allowed_hosts,
-            }),
+        result = await _generate_cli_tool_impl(
+            name=name,
+            description=f"[{org.name}] {description}",
+            parameters_json=parameters_json,
+            tool_code=tool_code,
+            requires_network=requires_network,
+            allowed_hosts=allowed_hosts,
         )
 
         if "created and registered" in result.lower() or "✅" in result:
@@ -757,8 +822,278 @@ def _build_bound_org_tools(user_id: int) -> list:
 
         return result
 
+    # ── Goal Decomposition: Full project setup from a plain-English goal ──
+
+    @function_tool(
+        name_override="setup_org_project",
+        failure_error_function=_org_tool_error,
+        timeout=60,
+    )
+    async def setup_org_project(
+        goal: str,
+        org_name: Optional[str] = None,
+        org_id: Optional[int] = None,
+    ) -> str:
+        """Plan and fully set up a project from a plain-English goal.
+
+        Given a goal such as 'audit the Atlas Personal Assistant code to verify
+        it is working correctly', this tool will:
+        1. Derive a structured plan — which specialist agents are needed, what
+           skills and tools each agent should have, and which tasks to create.
+        2. Create or reuse an organization as the project container.
+        3. Add every planned agent (with skills and allowed_tools) to the org.
+        4. Create every planned task and assign it to the correct agent.
+        5. Return a human-readable summary of everything that was set up.
+
+        Use this whenever the user asks to 'set up a project', 'create a team
+        for X', or describes a goal that clearly needs multiple agents and tasks.
+
+        Args:
+            goal: Plain-English description of the project goal, e.g.
+                  'audit the Atlas code to check it is working correctly'
+            org_name: Optional name for the new organization (auto-derived if omitted)
+            org_id: Optional existing org ID to add the plan into instead of creating one
+        """
+        import json
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI()
+
+        # ── Step 1: Ask the LLM to produce a structured plan ──────────
+        planning_prompt = f"""You are a project planner for an AI personal assistant system called Atlas.
+The user wants to achieve the following goal:
+
+  GOAL: {goal}
+
+Produce a JSON execution plan with this exact structure (no markdown fences, raw JSON only):
+{{
+  "org_name": "<short descriptive project name, e.g. 'Atlas Code Audit'>",
+  "org_goal": "<one-sentence mission statement>",
+  "agents": [
+    {{
+      "name": "<agent name>",
+      "role": "<role slug, e.g. 'auditor', 'reporter', 'monitor'>",
+      "description": "<what this agent does>",
+      "instructions": "<specific behaviour instructions for this agent>",
+      "skills": ["<skill_id>", ...],
+      "allowed_tools": ["<tool_name>", ...]
+    }}
+  ],
+  "tasks": [
+    {{
+      "title": "<task title>",
+      "description": "<task details>",
+      "priority": "high|medium|low",
+      "agent_name": "<name of agent from the agents list above who owns this task>"
+    }}
+  ]
+}}
+
+Rules:
+- Include 2–5 agents maximum.  Keep the team small and focused.
+- Include 4–10 tasks that cover the full workflow from start to finish.
+- Skills must come from this list only: code_audit, scheduler_diagnostics,
+  memory_review, tool_registry_check, api_health, log_analysis, self_improvement.
+- Allowed tools must come from this list only: get_my_recent_context,
+  summarize_my_conversation, list_tools, run_code_audit, check_scheduler_health,
+  list_schedules, get_org_status.
+- Each task MUST reference an agent_name that exists in the agents list.
+- Respond with raw JSON only — no explanation, no markdown.
+"""
+        try:
+            response = await client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": planning_prompt}],
+                temperature=0.2,
+                response_format={"type": "json_object"},
+            )
+            raw = response.choices[0].message.content or "{}"
+            plan = json.loads(raw)
+        except Exception as exc:
+            logger.exception("Planning LLM call failed: %s", exc)
+            return (
+                f"I couldn't generate a plan for that goal due to an error: {exc}. "
+                "Please try rephrasing the goal or create the org, agents, and tasks manually."
+            )
+
+        planned_agents: list[dict] = plan.get("agents") or []
+        planned_tasks: list[dict] = plan.get("tasks") or []
+        resolved_org_name = org_name or plan.get("org_name") or "New Project"
+        resolved_org_goal = plan.get("org_goal") or goal
+
+        if not planned_agents:
+            return "The plan came back empty. Please describe the goal in more detail."
+
+        # ── Step 2: Create or reuse the organization ───────────────────
+        async with async_session() as session:
+            if org_id:
+                org = await _get_owned_org(session, org_id, user_id)
+                if not org:
+                    return f"Organization {org_id} not found or you don't own it."
+                created_org = False
+            else:
+                org = Organization(
+                    name=resolved_org_name,
+                    goal=resolved_org_goal,
+                    owner_user_id=user_id,
+                    status="active",
+                )
+                session.add(org)
+                await session.flush()
+                await _log_activity(
+                    session, org.id, "org_created",
+                    f"Organization '{resolved_org_name}' created by project setup",
+                )
+                created_org = True
+
+            # ── Step 3: Create agents ──────────────────────────────────
+            agent_name_to_obj: dict[str, OrgAgent] = {}
+            for ap in planned_agents:
+                tc: dict = {}
+                if ap.get("skills"):
+                    tc["skills"] = [s.strip() for s in ap["skills"] if s.strip()]
+                if ap.get("allowed_tools"):
+                    tc["allowed_tools"] = [t.strip() for t in ap["allowed_tools"] if t.strip()]
+                db_agent = OrgAgent(
+                    org_id=org.id,
+                    name=ap.get("name", "Agent").strip(),
+                    role=ap.get("role", "specialist").strip(),
+                    description=ap.get("description"),
+                    instructions=ap.get("instructions"),
+                    tools_config=tc if tc else None,
+                    status="active",
+                )
+                session.add(db_agent)
+                await session.flush()
+                await _log_activity(
+                    session, org.id, "agent_created",
+                    f"Agent '{db_agent.name}' added by project setup",
+                    agent_id=db_agent.id,
+                )
+                agent_name_to_obj[db_agent.name] = db_agent
+
+            # ── Step 4: Create tasks and assign them ───────────────────
+            created_tasks: list[OrgTask] = []
+            for tp in planned_tasks:
+                assigned_agent = agent_name_to_obj.get(tp.get("agent_name", ""))
+                priority = tp.get("priority", "medium")
+                if priority not in ("high", "medium", "low"):
+                    priority = "medium"
+                db_task = OrgTask(
+                    org_id=org.id,
+                    agent_id=assigned_agent.id if assigned_agent else None,
+                    title=tp.get("title", "Task").strip(),
+                    description=tp.get("description"),
+                    priority=priority,
+                    status="in_progress" if assigned_agent else "pending",
+                    source="telegram",
+                    assigned_at=datetime.now(timezone.utc) if assigned_agent else None,
+                )
+                session.add(db_task)
+                await session.flush()
+                await _log_activity(
+                    session, org.id, "task_created",
+                    f"Task '{db_task.title}' created by project setup",
+                    agent_id=db_task.agent_id,
+                    task_id=db_task.id,
+                )
+                created_tasks.append(db_task)
+
+            await session.commit()
+            final_org_id = org.id
+            final_org_name = org.name
+
+        # ── Step 5: Validate skills and tools exist (sandbox check) ───
+        from pathlib import Path as _Path
+        _tools_plugin_dir = _Path("src/tools/plugins")
+
+        # Build live skill ID set from registry
+        try:
+            from src.skills.registry import SkillRegistry
+            from src.skills.internal import (
+                build_memory_skill, build_organization_skill, build_scheduler_skill,
+            )
+            _check_registry = SkillRegistry()
+            _check_registry.register(build_memory_skill(user_id))
+            _check_registry.register(build_organization_skill(user_id))
+            _check_registry.register(build_scheduler_skill(user_id))
+            _known_skill_ids = set(_check_registry._skills.keys())
+        except Exception:
+            _known_skill_ids = set()
+
+        # Build live tool name set from DB + plugin dir
+        try:
+            from src.db.models import Tool as _Tool
+            from sqlalchemy import select as _sel
+            async with async_session() as _vs:
+                _db_tools = (await _vs.execute(_sel(_Tool).where(_Tool.is_active == True))).scalars().all()  # noqa: E712
+            _known_tool_names = {t.name for t in _db_tools}
+        except Exception:
+            _known_tool_names = set()
+        # Also accept any plugin directory that exists on disk
+        if _tools_plugin_dir.exists():
+            _known_tool_names |= {p.name for p in _tools_plugin_dir.iterdir() if p.is_dir()}
+
+        validation_warnings: list[str] = []
+        async with async_session() as vsession:
+            for agent_name, db_agent in agent_name_to_obj.items():
+                vtc = dict(db_agent.tools_config or {})
+                val: dict = {"skills": {}, "tools": {}}
+                for sk in vtc.get("skills", []):
+                    ok = sk in _known_skill_ids
+                    val["skills"][sk] = "✅ found" if ok else "⚠️ not registered"
+                    if not ok:
+                        validation_warnings.append(f"Agent '{agent_name}': skill '{sk}' not found in registry")
+                for tn in vtc.get("allowed_tools", []):
+                    ok = tn in _known_tool_names
+                    val["tools"][tn] = "✅ found" if ok else "⚠️ not installed"
+                    if not ok:
+                        validation_warnings.append(f"Agent '{agent_name}': tool '{tn}' not installed")
+                vtc["validation"] = val
+                db_agent.tools_config = vtc
+                vsession.add(db_agent)
+            await vsession.commit()
+
+        # ── Step 6: Build the human-readable summary ───────────────────
+        lines: list[str] = []
+        if created_org:
+            lines.append(f"✅ **Project created: {final_org_name}** (ID: {final_org_id})")
+        else:
+            lines.append(f"✅ **Plan added to: {final_org_name}** (ID: {final_org_id})")
+        lines.append(f"**Goal:** {resolved_org_goal}\n")
+
+        lines.append(f"**Agents ({len(planned_agents)}):**")
+        for name, a in agent_name_to_obj.items():
+            tc = a.tools_config or {}
+            skill_note = f" | skills: {', '.join(tc['skills'])}" if tc.get("skills") else ""
+            tool_note = f" | tools: {', '.join(tc['allowed_tools'])}" if tc.get("allowed_tools") else ""
+            lines.append(f"  • **{a.name}** ({a.role}){skill_note}{tool_note}")
+
+        lines.append(f"\n**Tasks ({len(created_tasks)}):**")
+        for t in created_tasks:
+            assigned = agent_name_to_obj.get(
+                next((n for n, a in agent_name_to_obj.items() if a.id == t.agent_id), ""),
+                None,
+            )
+            owner = f" → {assigned.name}" if assigned else " (unassigned)"
+            icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(t.priority, "⚪")
+            lines.append(f"  {icon} {t.title}{owner}")
+
+        if validation_warnings:
+            lines.append("\n⚠️ **Validation issues found** (project still created — fix these to make agents fully operational):")
+            for w in validation_warnings:
+                lines.append(f"  • {w}")
+        else:
+            lines.append("\n✅ **All assigned skills and tools validated successfully.**")
+
+        lines.append(
+            f"\nEverything is visible in the **Atlas Dashboard** under Organizations."
+        )
+        return "\n".join(lines)
+
     return [
         list_organizations,
+        find_organization,
         create_organization,
         update_organization,
         get_organization_status,
@@ -771,4 +1106,5 @@ def _build_bound_org_tools(user_id: int) -> list:
         list_org_schedules,
         cancel_org_schedule,
         create_org_tool,
+        setup_org_project,
     ]

@@ -69,12 +69,23 @@ It also maintains conversation context — it remembers what you discussed in re
 | `/persona style casual` | Change communication style |
 | `/schedules` | List all scheduled tasks |
 | `/cancel <id>` | Cancel a scheduled task |
+| `/orgs` | Manage organizations (list/create/info/pause/resume/delete) |
 | `/tools` | List available tools |
 | `/memory` | See what the assistant remembers about you |
 | `/forget <topic>` | Ask assistant to forget something |
 | `/stats` | View usage statistics and costs |
 | `/connect google` | Connect your Google Workspace |
-| `/feedback` | Rate the last interaction |
+
+### Organization Management
+
+Use `/orgs` to manage organizations from Telegram:
+
+- `/orgs` — list organizations
+- `/orgs create` — start a guided 3-step creation wizard
+- `/orgs info <id>` — show organization details
+- `/orgs pause <id>` — pause/deactivate an organization
+- `/orgs resume <id>` — reactivate an organization
+- `/orgs delete <id>` — delete an organization
 
 ### Approval Flows
 

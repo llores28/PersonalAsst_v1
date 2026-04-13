@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     max_tool_calls_per_request: int = Field(default=20)
     agent_timeout_seconds: int = Field(default=120)
     tool_subprocess_timeout: int = Field(default=30)
+    startup_migrations_enabled: bool = Field(default=False)
 
     # ── Google Workspace (optional, Phase 2+) ──
     google_oauth_client_id: str = Field(default="")

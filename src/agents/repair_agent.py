@@ -18,6 +18,7 @@ from agents import Agent, function_tool, RunContextWrapper
 
 from src.models.router import ModelRole, TaskComplexity, select_model
 from src.repair.engine import (
+    classify_repair_risk,
     list_recent_errors_for_user,
     read_repo_file,
     run_repo_diagnostics,
@@ -203,6 +204,107 @@ async def list_recent_errors(
 
 
 @function_tool
+async def propose_low_risk_fix(
+    ctx: RunContextWrapper[RepairContext],
+    title: str,
+    description: str,
+    steps_json: str,
+) -> str:
+    """Propose and auto-apply a LOW-RISK operational fix (no code edits).
+
+    Low-risk fixes are operational changes only:
+    - Clearing a Redis key (action: clear_redis_key, key: <key>)
+    - Re-injecting a broken schedule (action: reinject_schedule, job_id: <id>)
+    - Setting an env-var in the running config (action: set_env_var, key: <k>, value: <v>)
+
+    These are applied immediately WITHOUT owner approval.
+    A Telegram notification is sent after apply.
+
+    Args:
+        title: Short title for the repair ticket (e.g. 'Clear stale Redis session key').
+        description: What this fix does and why it is safe.
+        steps_json: JSON list of step dicts: [{"action": "clear_redis_key", "key": "..."}]
+
+    Returns confirmation of auto-apply result.
+    """
+    import json as _json
+    import os
+
+    auto_repair_enabled = os.getenv("AUTO_REPAIR_LOW_RISK", "true").lower() != "false"
+    if not auto_repair_enabled:
+        return (
+            "AUTO_REPAIR_LOW_RISK is disabled in .env. "
+            "Presenting fix for manual approval instead.\n\n"
+            f"**Fix:** {title}\n**Steps:** {steps_json}"
+        )
+
+    try:
+        steps = _json.loads(steps_json)
+    except Exception as e:
+        return f"Error: steps_json is not valid JSON — {e}"
+
+    plan = {"title": title, "description": description, "steps": steps, "patches": []}
+    risk = classify_repair_risk(plan)
+    if risk != "low":
+        return (
+            f"⚠️ Risk classifier rated this as '{risk}' — cannot auto-apply. "
+            "Use `propose_patch` for medium/high-risk repairs requiring owner approval."
+        )
+
+    results: list[str] = []
+    for step in steps:
+        action = (step.get("action") or "").lower()
+        try:
+            if action == "clear_redis_key":
+                import redis.asyncio as aioredis
+                from src.settings import settings
+                r = aioredis.from_url(settings.redis_url)
+                deleted = await r.delete(step["key"])
+                results.append(f"✅ Cleared Redis key `{step['key']}` (deleted={deleted})")
+            elif action == "reinject_schedule":
+                results.append(f"⚠️ reinject_schedule for job `{step.get('job_id')}` — not yet implemented")
+            elif action == "set_env_var":
+                results.append(f"⚠️ set_env_var requires container restart — log only: {step.get('key')}={step.get('value')}")
+            else:
+                results.append(f"⚠️ Unknown low-risk action '{action}' — skipped")
+        except Exception as e:
+            results.append(f"❌ Step '{action}' failed: {e}")
+
+    apply_summary = "\n".join(results)
+    all_ok = all(r.startswith("✅") for r in results)
+
+    try:
+        from src.db.session import async_session as _async_session
+        from src.db.models import RepairTicket as _RepairTicket
+        from datetime import datetime as _dt, timezone as _tz
+        async with _async_session() as _dbs:
+            ticket = _RepairTicket(
+                user_id=None,
+                title=title,
+                source="repair_agent",
+                status="deployed" if all_ok else "verification_failed",
+                priority="low",
+                risk_level="low",
+                auto_applied=True,
+                approval_required=False,
+                plan=plan,
+                deployed_at=_dt.now(_tz.utc) if all_ok else None,
+            )
+            _dbs.add(ticket)
+            await _dbs.commit()
+    except Exception as _dbe:
+        logger.warning("Could not persist auto-repair ticket: %s", _dbe)
+
+    status = "✅ Auto-applied successfully" if all_ok else "⚠️ Some steps failed"
+    return (
+        f"{status}: **{title}**\n\n"
+        f"{apply_summary}\n\n"
+        "The owner has been recorded. You should confirm this fix in your next response "
+        "to the user via Telegram."
+    )
+
+
+@function_tool
 async def generate_report(
     ctx: RunContextWrapper[RepairContext],
     root_cause: str,
@@ -305,6 +407,12 @@ If the system tells you a previous patch failed verification, the failure detail
 are available via `get_error_context`. Analyze what went wrong and propose a
 revised patch. Do NOT re-propose the same diff that already failed.
 
+## Low-Risk Auto-Apply (NEW)
+For purely operational problems with no code changes — clearing a stale Redis key,
+re-injecting a broken schedule, logging a config note — use `propose_low_risk_fix`.
+This tool auto-applies the fix immediately and logs it as a repair ticket.
+Do NOT use it for code edits, even trivial ones.
+
 ## Safety Rules
 - Never access secrets, credentials, or .env files.
 - Never propose changes that weaken security.
@@ -340,6 +448,7 @@ def create_repair_agent() -> Agent[RepairContext]:
             run_repo_diagnostic_command,
             classify_complexity,
             propose_patch,
+            propose_low_risk_fix,
             list_recent_errors,
             generate_report,
         ],

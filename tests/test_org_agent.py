@@ -84,7 +84,7 @@ class TestOrganizationSkillDefinition:
         skill = build_organization_skill(user_id=42)
         assert skill.id == "organizations"
         assert skill.group == SkillGroup.INTERNAL
-        assert len(skill.tools) == 13
+        assert len(skill.tools) == 14
         assert skill.read_only is False
 
     def test_skill_has_routing_hints(self) -> None:
@@ -106,6 +106,7 @@ class TestOrganizationSkillDefinition:
     def test_skill_has_instructions(self) -> None:
         skill = build_organization_skill(user_id=42)
         assert "list_organizations" in skill.instructions
+        assert "find_organization" in skill.instructions
         assert "schedule_org_task" in skill.instructions
         assert "create_org_tool" in skill.instructions
         assert "Google Tasks" in skill.instructions
@@ -187,6 +188,46 @@ class TestCreateOrganization:
         with _mock_session():
             result = await create_org(name="Valid Name", goal="")
         assert "cannot be empty" in result
+
+
+class TestFindOrganization:
+    @pytest.mark.asyncio
+    async def test_find_org_no_query(self) -> None:
+        tools = _get_tools()
+        find_org = tools["find_organization"]
+
+        result = await find_org(name_query="")
+        assert "Provide part of the organization name" in result
+
+    @pytest.mark.asyncio
+    async def test_find_org_single_match(self) -> None:
+        tools = _get_tools()
+        find_org = tools["find_organization"]
+
+        org = _make_org(id=7, name="DevOps")
+        match_result = MagicMock()
+        match_result.scalars.return_value.all.return_value = [org]
+
+        with _mock_session(execute_return=match_result):
+            result = await find_org(name_query="Dev")
+        assert "DevOps" in result
+        assert "`7`" in result
+
+    @pytest.mark.asyncio
+    async def test_find_org_multiple_matches(self) -> None:
+        tools = _get_tools()
+        find_org = tools["find_organization"]
+
+        org_a = _make_org(id=7, name="DevOps")
+        org_b = _make_org(id=8, name="Dev Tools")
+        match_result = MagicMock()
+        match_result.scalars.return_value.all.return_value = [org_a, org_b]
+
+        with _mock_session(execute_return=match_result):
+            result = await find_org(name_query="Dev")
+        assert "organizations matching 'Dev'" in result
+        assert "`7`" in result
+        assert "`8`" in result
 
 
 class TestUpdateOrganization:
@@ -407,6 +448,32 @@ class TestCreateOrgTool:
                 parameters_json="{}", tool_code="print('hi')",
             )
         assert "not found" in result
+
+    @pytest.mark.asyncio
+    async def test_create_tool_uses_impl_bridge(self) -> None:
+        tools = _get_tools()
+        create_tool = tools["create_org_tool"]
+
+        org = _make_org(id=1, name="DevOps")
+
+        with _mock_session(get_return=org):
+            with patch(
+                "src.agents.tool_factory_agent._generate_cli_tool_impl",
+                new=AsyncMock(return_value="✅ Tool **audit_tool** created and registered!"),
+            ) as mock_impl:
+                result = await create_tool(
+                    org_id=1,
+                    name="audit_tool",
+                    description="Weekly audit utility",
+                    parameters_json="{}",
+                    tool_code="print('ok')",
+                )
+
+        assert "created and registered" in result.lower()
+        mock_impl.assert_awaited_once()
+        kwargs = mock_impl.await_args.kwargs
+        assert kwargs["name"] == "audit_tool"
+        assert kwargs["description"].startswith("[DevOps]")
 
 
 # ---------------------------------------------------------------------------

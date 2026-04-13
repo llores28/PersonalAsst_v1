@@ -2,9 +2,9 @@
 
 ## Current Status
 
-**Phase:** All core phases (1–7) implemented and operational  
-**Date:** April 10, 2026  
-**Test suite:** 540+ passing (21 test files), 30 pre-existing SDK-absent failures (import-only, pass in Docker)
+**Phase:** All core phases (1–9) implemented and operational  
+**Date:** April 12, 2026  
+**Test suite:** 540+ passing (21 test files + 5 new), 30 pre-existing SDK-absent failures (import-only, pass in Docker)
 
 ## What Exists
 
@@ -13,10 +13,10 @@
 | Research document | Complete | `RESEARCH_PersonalAssistant.md` — 21 sections, gaps analysis |
 | PRD | Complete | `PRD_PersonalAssistant.md` — 18 sections, all gaps resolved |
 | Bootstrap | Complete | Team tier bootstrap plus VS Code migration scaffolding for instructions, prompts, and tasks |
-| Source code | **Complete** | `src/` — 13 agent files, 10 skills, scheduler, memory, tools (+ credential vault), security |
+| Source code | **Complete** | `src/` — 19 agent files, 10 skills, scheduler, memory, tools (+ credential vault), security |
 | Docker Compose | **Running** | 5 services: assistant, postgres, qdrant, redis, workspace-mcp |
 | Tests | **493+ passing** | 20 test files covering agents, tools, guardrails, scheduling, memory |
-| ADRs | **12 written** | Architecture decision records in `docs/ADR-*.md` |
+| ADRs | **13 written** | Architecture decision records in `docs/ADR-*.md` |
 
 ## Completed Phases
 
@@ -99,7 +99,28 @@
 8. `.github/prompts/` — VS Code prompt files wrapping the highest-value workflows
 9. `.windsurf/` — legacy Windsurf rules, skills, and workflows kept as migration reference
 
-## In Progress — Phase 7: Persona Interview Onboarding
+## Phase 9 — Agentic Upgrade (Complete — April 12, 2026)
+
+**Goal:** Make Atlas perform like Anthropic's Computer Use — parallel execution, autonomous background jobs, step-by-step observability, and auto-healing operational issues.
+
+| Milestone | Description | Status |
+|-----------|-------------|--------|
+| **M3 Explainable Observability** | `AgentTrace` table, trace persistence in orchestrator, `GET /api/traces`, Dashboard Timeline drawer | ✅ Complete |
+| **M4 Self-Healing Loop** | `classify_repair_risk()`, `propose_low_risk_fix` auto-apply, `verifier.py`, `risk_level`/`auto_applied` on RepairTicket, Repairs tab | ✅ Complete |
+| **M1 Parallel Fan-Out** | `parallel_runner.py` asyncio.gather (max 3 branches, budget guard), `detect_parallel_domains()`, orchestrator pre-flight | ✅ Complete |
+| **M2 Background Jobs** | `background_job.py`, `BackgroundJob` model, orchestrator monitor-phrase detection, Jobs Dashboard tab | ✅ Complete |
+| **Repo Cleanup** | 4 backup dirs deleted, `.gitignore`/`.dockerignore` hardened, Dockerfile alembic fix, compose bind-mount removed | ✅ Complete |
+
+New files added:
+- `src/agents/parallel_runner.py` — asyncio fan-out runner
+- `src/agents/background_job.py` — autonomous background job lifecycle
+- `src/repair/verifier.py` — post-apply smoke test + rollback
+- `alembic/versions/006_agentic_upgrade.py` — migration for agent_traces, background_jobs, repair_tickets columns
+- `.dockerignore` — lean Docker build context
+
+---
+
+## Phase 7 — Persona Interview Onboarding (Complete)
 
 **Goal:** Transform PersonalAsst from a generic assistant into a digital clone that communicates and decides like its owner.
 
@@ -116,7 +137,7 @@
 
 See `docs/ADR-2026-03-21-persona-interview-onboarding.md` for full design rationale.
 
-## In Progress — Phase 8: Tool Factory Infrastructure + LinkedIn
+## Phase 8 — Tool Factory Infrastructure + LinkedIn (Complete)
 
 **Goal:** Fix Tool Factory infrastructure gaps and build the first real function-type tool (LinkedIn).
 
@@ -142,12 +163,14 @@ See `docs/ADR-2026-03-21-persona-interview-onboarding.md` for full design ration
 
 ## Pending / Future Work
 
+- **Background job `reinject_schedule` action** — partially implemented, needs APScheduler hook
 - **Easy Apply** — requires browser automation (Playwright MCP sidecar), deferred
 - **Graph memory** (Apache AGE) — advanced/optional, deferred
 - **WhatsApp / Discord adapters** — optional future channels
 - **Google Tasks API deep integration** — workspace-mcp supports `--tools tasks`
 - **Multi-user support** — requires full tenancy redesign
-- **Scheduler UI** — web dashboard for managing scheduled tasks
+- **Parallel runner unit tests** — `test_parallel_runner.py` and `test_background_job.py` not yet written
+- **Background job cancel via Telegram `/cancel`** — route `/cancel` to background_job cancel by ID
 
 ## Environment Requirements
 

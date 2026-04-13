@@ -133,8 +133,6 @@ services:
         condition: service_healthy
     ports:
       - "8000:8000"
-    volumes:
-      - ./src/orchestration:/app/src/orchestration
 
   # ─── Orchestration Web UI ───
   orchestration-ui:

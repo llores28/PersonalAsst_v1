@@ -1,5 +1,8 @@
 """Tests for Phase 4 scheduling system."""
 
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
 from src.agents.scheduler_agent import (
@@ -149,3 +152,70 @@ class TestOrchestratorPhase4:
         from src.agents.scheduler_agent import create_scheduler_agent
         agent = create_scheduler_agent()
         assert agent.name == "SchedulerAgent"
+
+
+class TestSchedulerSyncRegression:
+    @pytest.mark.asyncio
+    async def test_sync_one_shot_normalizes_run_at_to_iso_string(self) -> None:
+        from src.scheduler.engine import sync_tasks_from_db
+
+        fake_task = SimpleNamespace(
+            apscheduler_id="job_once_1",
+            trigger_type="once",
+            trigger_config={"once": {"run_at": "2026-04-10T19:30:00Z"}},
+            user_id=42,
+            description="One-shot reminder",
+        )
+
+        class _FakeResult:
+            def scalars(self):
+                return SimpleNamespace(all=lambda: [fake_task])
+
+        class _FakeSession:
+            async def execute(self, _query):
+                return _FakeResult()
+
+        class _FakeSessionFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return _FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        fake_db_session_module = ModuleType("src.db.session")
+        fake_db_session_module.async_session = _FakeSessionFactory()
+        fake_db_models_module = ModuleType("src.db.models")
+
+        class _FakeScheduledTask:
+            is_active = True
+
+        fake_db_models_module.ScheduledTask = _FakeScheduledTask
+
+        fake_query = MagicMock()
+        fake_query.where.return_value = fake_query
+
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "src.db.session": fake_db_session_module,
+                    "src.db.models": fake_db_models_module,
+                },
+            ),
+            patch("sqlalchemy.select", return_value=fake_query),
+            patch(
+                "src.scheduler.engine.get_scheduler",
+                new=AsyncMock(return_value=SimpleNamespace(get_schedules=AsyncMock(return_value=[]))),
+            ),
+            patch("src.scheduler.engine.add_one_shot_job", new=AsyncMock(return_value="job_once_1")) as mock_add_one_shot,
+        ):
+            result = await sync_tasks_from_db()
+
+        assert result["added"] == 1
+        assert result["errors"] == 0
+        run_at_arg = mock_add_one_shot.await_args.kwargs["run_at"]
+        assert isinstance(run_at_arg, str)
+        assert run_at_arg == "2026-04-10T19:30:00+00:00"

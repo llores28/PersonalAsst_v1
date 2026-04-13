@@ -150,18 +150,25 @@ def classify_action_request(user_message: str) -> ActionPolicyDecision:
             rationale="This follow-up updates task state using the most recent task context.",
         )
 
+    # Internal creates/updates (assistant-managed reminders/tasks/org state) are safe to proceed
+    # without extra confirmation when the user has already expressed the intent.
     if any(verb in lowered for verb in ("add ", "create ", "set ", "schedule ")) and any(
-        target in lowered for target in ("task", "todo", "to do")
+        target in lowered for target in ("task", "todo", "to do", "reminder", "org", "organization")
     ):
         return ActionPolicyDecision(
             action_class="internal_write",
-            requires_confirmation=True,
-            rationale="This request changes assistant-managed state like reminders, tasks, or schedules.",
+            requires_confirmation=False,
+            rationale="Benign internal write (create/update reminders/tasks/org) — proceed and summarize.",
         )
 
     if any(cue in lowered for cue in _INTERNAL_WRITE_CUES):
-        requires_confirmation = any(keyword in lowered for keyword in ("forget", "clear", "pause", "cancel", "remind me", "set a reminder", "create reminder", "schedule a reminder", "add to my task", "add to my todo", "add to my to do", "create a task", "create task", "create a todo", "create todo", "morning brief"))
-        rationale = "This request changes assistant-managed state like memory or schedules."
+        # Only destructive internal writes require confirmation.
+        destructive_keywords = ("forget", "clear", "pause", "cancel", "delete", "remove", "stop")
+        requires_confirmation = any(keyword in lowered for keyword in destructive_keywords)
+        rationale = (
+            "Internal write to assistant-managed state. "
+            + ("Destructive change requires confirmation." if requires_confirmation else "Proceed without extra prompts.")
+        )
         return ActionPolicyDecision(
             action_class="internal_write",
             requires_confirmation=requires_confirmation,

@@ -95,9 +95,24 @@ async def seed_tool_credentials() -> None:
 
 
 async def run_migrations() -> None:
-    """Run Alembic migrations programmatically on startup."""
-    # TODO: Fix Alembic hanging issue - migrations are already applied
-    logger.info("Skipping migrations (already applied)")
+    """Run Alembic migrations programmatically when explicitly enabled."""
+    if not settings.startup_migrations_enabled:
+        logger.info(
+            "Skipping startup migrations (set STARTUP_MIGRATIONS_ENABLED=true to enable)."
+        )
+        return
+
+    logger.info("Running startup migrations via Alembic")
+    try:
+        from alembic import command
+        from alembic.config import Config
+
+        alembic_cfg = Config("alembic.ini")
+        command.upgrade(alembic_cfg, "head")
+        logger.info("Startup migrations applied successfully")
+    except Exception as e:
+        logger.exception("Startup migrations failed: %s", e)
+        raise
 
 
 async def main() -> None:
@@ -128,20 +143,10 @@ async def main() -> None:
 
         # Create bot and dispatcher
         bot = Bot(token=settings.telegram_bot_token)
-        
-        # Test command registration immediately
-        logger.info("=== TESTING COMMAND REGISTRATION ===")
+
         from aiogram.types import BotCommand
         from aiogram.methods import SetMyCommands, GetMyCommands
-        
-        test_commands = [BotCommand(command="test2", description="Test command 2")]
-        try:
-            result = await bot(SetMyCommands(commands=test_commands))
-            logger.info(f"Test registration result: {result}")
-        except Exception as e:
-            logger.error(f"Test registration failed: {e}")
-            logger.exception("Test registration exception:")
-        
+
         dp = Dispatcher()
 
         # Register handlers
@@ -157,6 +162,7 @@ async def main() -> None:
             BotCommand(command="forget", description="Delete specific memories"),
             BotCommand(command="stats", description="View usage statistics and costs"),
             BotCommand(command="tools", description="List available tools and manage credentials"),
+            BotCommand(command="orgs", description="Manage organizations and teams"),
             BotCommand(command="skills", description="Manage skills (list, create, reload)"),
             BotCommand(command="schedules", description="List scheduled tasks"),
             BotCommand(command="connect", description="Connect to services (e.g., /connect google)"),

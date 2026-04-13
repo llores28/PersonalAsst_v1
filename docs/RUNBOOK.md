@@ -19,7 +19,7 @@ docker compose up -d
 
 ### Stop Everything
 ```bash
-docker compose down
+docker compose down --remove-orphans
 ```
 
 ### View Logs
@@ -36,8 +36,9 @@ docker compose logs --tail=50 assistant
 
 ### Rebuild Assistant After Source Changes
 ```bash
-docker compose build assistant
-docker compose up -d assistant
+docker compose down --remove-orphans
+docker compose build
+docker compose up -d
 ```
 
 The assistant container copies `src/`, `tests/`, and config files into the image at build time. Only `src/tools/plugins/` is bind-mounted live, so Python code changes in agents, routing, and handlers do not reach Telegram until you rebuild or restart the assistant container with a fresh image.
@@ -46,6 +47,17 @@ The assistant container copies `src/`, `tests/`, and config files into the image
 ```bash
 docker compose exec assistant alembic upgrade head
 ```
+
+### Startup Migration Gate
+
+- Startup migrations are disabled by default.
+- To enable startup Alembic execution, set:
+
+```bash
+STARTUP_MIGRATIONS_ENABLED=true
+```
+
+- Recommended operational pattern remains explicit migrations via `alembic upgrade head`.
 
 ### Backup Database
 ```bash
@@ -134,8 +146,26 @@ If the bot gives generic errors or "No tool call found" 400 errors:
    ```
 4. Common issues:
    - **`DateTrigger` errors** → ensure `run_time=` parameter (not `run_date=`, APScheduler 4.x API)
+   - **One-shot DB sync not firing** → ensure `scheduled_tasks.trigger_config.once.run_at` is valid ISO datetime
    - **`FunctionTool object is not callable`** → bound tools must call `_*_impl` functions, not `@function_tool` objects
    - **Naive datetime rejected** → engine auto-attaches default timezone, but verify `DEFAULT_TIMEZONE` in `.env`
+
+### Dashboard API Access / CORS
+
+1. Configure dashboard origins in `.env`:
+   - `CORS_ALLOWED_ORIGINS=http://localhost:3001,http://127.0.0.1:3001`
+2. Wildcard `*` is ignored for dashboard API CORS.
+3. If using multiple users or explicit request scoping, dashboard API accepts `X-Telegram-Id` header for org ownership resolution.
+
+### Organization Management
+
+- Telegram org lifecycle commands are available:
+  - `/orgs create`
+  - `/orgs info <id>`
+  - `/orgs pause <id>`
+  - `/orgs resume <id>`
+  - `/orgs delete <id>`
+- Org deletes write durable `audit_log` entries in addition to org activity feed.
 
 ## Monitoring Queries
 
