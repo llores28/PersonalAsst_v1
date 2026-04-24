@@ -107,7 +107,7 @@ async def run_migrations() -> None:
         from alembic import command
         from alembic.config import Config
 
-        alembic_cfg = Config("alembic.ini")
+        alembic_cfg = Config("src/alembic.ini")
         command.upgrade(alembic_cfg, "head")
         logger.info("Startup migrations applied successfully")
     except Exception as e:
@@ -115,13 +115,25 @@ async def run_migrations() -> None:
         raise
 
 
+_HEALTH_FILE = "/tmp/assistant-healthy"
+
+
+async def _health_probe_loop() -> None:
+    """Write a liveness file every 30 seconds for Docker healthcheck."""
+    import pathlib
+    health_path = pathlib.Path(_HEALTH_FILE)
+    while True:
+        try:
+            health_path.write_text(str(asyncio.get_event_loop().time()))
+        except Exception:
+            pass
+        await asyncio.sleep(30)
+
+
 async def main() -> None:
     """Main entry point."""
     try:
         logger.info("Starting PersonalAssistant...")
-
-        # Set OpenAI API key
-        os.environ["OPENAI_API_KEY"] = settings.openai_api_key
 
         # Run DB migrations
         await run_migrations()
@@ -167,6 +179,9 @@ async def main() -> None:
             BotCommand(command="schedules", description="List scheduled tasks"),
             BotCommand(command="connect", description="Connect to services (e.g., /connect google)"),
             BotCommand(command="security", description="Configure security PIN or questions"),
+            BotCommand(command="voice", description="View or set TTS voice for audio replies"),
+            BotCommand(command="tickets", description="List open repair tickets"),
+            BotCommand(command="ticket", description="Approve or close a repair ticket"),
             BotCommand(command="cancel", description="Cancel current operation"),
         ]
         
@@ -185,10 +200,14 @@ async def main() -> None:
             logger.error(f"❌ Failed to register commands: {e}")
             logger.exception("Command registration error details:")
         
+        # Start lightweight health probe (writes liveness file for Docker healthcheck)
+        _health_task = asyncio.create_task(_health_probe_loop())
+
         logger.info("Bot starting — polling for messages...")
         try:
             await dp.start_polling(bot)
         finally:
+            _health_task.cancel()
             await stop_scheduler()
             await bot.session.close()
     

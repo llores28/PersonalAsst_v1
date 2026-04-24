@@ -1,32 +1,48 @@
-FROM python:3.12-slim
+# ── Stage 1: production ───────────────────────────────────────────────
+FROM python:3.12-slim AS prod
 
 WORKDIR /app
 
-# System dependencies
+# System dependencies (prod-only: no build-essential)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git curl postgresql-client && \
+    curl postgresql-client \
+    ffmpeg \
+    imagemagick \
+    git && \
     rm -rf /var/lib/apt/lists/*
 
-# Python dependencies
+# Production Python dependencies only
 COPY requirements.txt .
-COPY requirements-dev.txt .
-RUN pip install --no-cache-dir -r requirements-dev.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Install Playwright browsers in shared path (accessible to non-root user)
 ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright
 RUN playwright install --with-deps chromium && \
     chmod -R o+rx /opt/playwright
 
-# Application code (plugins are inside src/tools/plugins/)
+# Application code (config, alembic, user_skills all inside src/)
 COPY src/ ./src/
-COPY tests/ ./tests/
-COPY config/ ./config/
-COPY alembic/ ./alembic/
-COPY alembic.ini ./
-COPY pytest.ini ./
 
 # Non-root user
 RUN useradd -m -r assistant && chown -R assistant:assistant /app
 USER assistant
 
 CMD ["python", "-m", "src.main"]
+
+
+# ── Stage 2: development/CI (adds dev tools + tests on top of prod) ───
+FROM prod AS dev
+
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential git && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY requirements-dev.txt .
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+COPY tests/ ./tests/
+COPY pytest.ini ./
+
+RUN chown -R assistant:assistant /app
+USER assistant

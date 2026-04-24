@@ -1,5 +1,6 @@
 """Tests for the orchestrator agent."""
 
+import json
 import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, patch, MagicMock
@@ -305,6 +306,225 @@ class TestTemporalInputPreparation:
         from src.agents.orchestrator import _prepare_orchestrator_input
 
         assert _prepare_orchestrator_input("tell me a joke") == "tell me a joke"
+
+
+class TestDirectImageAnalysis:
+    @pytest.mark.asyncio
+    async def test_direct_image_analysis_calls_analyze_image_from_session(self) -> None:
+        from src.agents.orchestrator import _maybe_handle_direct_image_analysis
+        import base64 as _b64
+
+        fake_payload = _b64.b64encode(b"fakepng").decode()
+        session_json = json.dumps({"data_base64": fake_payload, "mime_type": "image/png"})
+
+        fake_result = SimpleNamespace(analysis="A dog playing in a park.")
+
+        with (
+            patch(
+                "src.memory.conversation.get_session_field",
+                new=AsyncMock(return_value=session_json),
+            ),
+            patch(
+                "src.memory.conversation.delete_session_field",
+                new=AsyncMock(),
+            ) as mock_delete,
+            patch(
+                "src.integrations.openrouter.analyze_image",
+                new=AsyncMock(return_value=fake_result),
+            ) as mock_analyze,
+            patch.object(
+                __import__("src.agents.orchestrator", fromlist=["settings"]).settings,
+                "openrouter_image_enabled",
+                True,
+            ),
+            patch.object(
+                __import__("src.agents.orchestrator", fromlist=["settings"]).settings,
+                "openrouter_api_key",
+                "test-key",
+            ),
+        ):
+            result = await _maybe_handle_direct_image_analysis(12345, "What is in this photo?")
+
+        assert result == "A dog playing in a park."
+        mock_analyze.assert_awaited_once()
+        call_kwargs = mock_analyze.call_args.kwargs
+        assert call_kwargs["prompt"] == "What is in this photo?"
+        assert call_kwargs["mime_type"] == "image/png"
+        assert call_kwargs["image_bytes"] == b"fakepng"
+        mock_delete.assert_awaited_once_with(12345, "latest_uploaded_image")
+
+    @pytest.mark.asyncio
+    async def test_direct_image_analysis_returns_none_when_no_session_image(self) -> None:
+        from src.agents.orchestrator import _maybe_handle_direct_image_analysis
+
+        with (
+            patch("src.memory.conversation.get_session_field", new=AsyncMock(return_value=None)),
+            patch.object(
+                __import__("src.agents.orchestrator", fromlist=["settings"]).settings,
+                "openrouter_image_enabled",
+                True,
+            ),
+            patch.object(
+                __import__("src.agents.orchestrator", fromlist=["settings"]).settings,
+                "openrouter_api_key",
+                "test-key",
+            ),
+        ):
+            result = await _maybe_handle_direct_image_analysis(12345, "What is in this photo?")
+
+        assert result is None
+
+
+class TestDirectImageGeneration:
+    def test_detects_explicit_image_generation_request(self) -> None:
+        from src.agents.orchestrator import _looks_like_explicit_image_generation_request
+
+        assert _looks_like_explicit_image_generation_request(
+            "create image using prompt: a photorealistic dog playing in the park"
+        ) is True
+        assert _looks_like_explicit_image_generation_request(
+            "draw a sunset over the mountains"
+        ) is True
+        assert _looks_like_explicit_image_generation_request(
+            "write a polished image prompt for me"
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_run_orchestrator_handles_explicit_image_request_directly(self) -> None:
+        from src.agents.orchestrator import run_orchestrator
+
+        fake_user = SimpleNamespace(display_name="Alex", id=7)
+
+        class _FakeResult:
+            def scalar_one_or_none(self):
+                return fake_user
+
+        class _FakeSession:
+            async def execute(self, _query):
+                return _FakeResult()
+
+        class _FakeSessionFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return _FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        fake_db_session_module = ModuleType("src.db.session")
+        fake_db_session_module.async_session = _FakeSessionFactory()
+        fake_db_models_module = ModuleType("src.db.models")
+
+        class _FakeUser:
+            telegram_id = "telegram_id"
+
+        fake_db_models_module.User = _FakeUser
+        fake_query = MagicMock()
+        fake_query.where.return_value = fake_query
+        generated = SimpleNamespace(
+            data_base64="aGVsbG8=",
+            mime_type="image/png",
+            prompt="draw a dog",
+            revised_prompt="A photorealistic dog",
+            model="test-image-model",
+        )
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "src.db.session": fake_db_session_module,
+                    "src.db.models": fake_db_models_module,
+                },
+            ),
+            patch("sqlalchemy.select", return_value=fake_query),
+            patch("src.memory.conversation.add_turn", new=AsyncMock()) as mock_add_turn,
+            patch("src.memory.conversation.get_conversation_history", new=AsyncMock(return_value=[])),
+            patch("src.repair.engine.maybe_handle_pending_repair", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._add_direct_response_to_session", new=AsyncMock()) as mock_add_direct,
+            patch("src.agents.orchestrator._maybe_handle_pending_connected_gmail_send", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._maybe_handle_connected_gmail_check", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._maybe_handle_connected_calendar_check", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._maybe_handle_connected_google_tasks_flow", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator.create_orchestrator_async", new=AsyncMock()) as mock_create_orchestrator,
+            patch("src.integrations.openrouter.generate_image", new=AsyncMock(return_value=generated)) as mock_generate_image,
+            patch("src.memory.conversation.set_session_field", new=AsyncMock()) as mock_set_session_field,
+            patch.object(__import__("src.agents.orchestrator", fromlist=["settings"]).settings, "openrouter_image_enabled", True),
+            patch.object(__import__("src.agents.orchestrator", fromlist=["settings"]).settings, "openrouter_api_key", "test-key"),
+        ):
+            result = await run_orchestrator(
+                12345,
+                "create image using prompt: a photorealistic female German Shepherd playing ball in the park",
+            )
+
+        assert result == "Generated your image with `test-image-model`."
+        mock_generate_image.assert_awaited_once()
+        mock_set_session_field.assert_awaited_once()
+        mock_create_orchestrator.assert_not_awaited()
+        mock_add_turn.assert_any_await(12345, "assistant", "Generated your image with `test-image-model`.")
+        mock_add_direct.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_run_orchestrator_reports_disabled_image_generation_clearly(self) -> None:
+        from src.agents.orchestrator import run_orchestrator
+
+        fake_user = SimpleNamespace(display_name="Alex", id=7)
+
+        class _FakeResult:
+            def scalar_one_or_none(self):
+                return fake_user
+
+        class _FakeSession:
+            async def execute(self, _query):
+                return _FakeResult()
+
+        class _FakeSessionFactory:
+            def __call__(self):
+                return self
+
+            async def __aenter__(self):
+                return _FakeSession()
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        fake_db_session_module = ModuleType("src.db.session")
+        fake_db_session_module.async_session = _FakeSessionFactory()
+        fake_db_models_module = ModuleType("src.db.models")
+
+        class _FakeUser:
+            telegram_id = "telegram_id"
+
+        fake_db_models_module.User = _FakeUser
+        fake_query = MagicMock()
+        fake_query.where.return_value = fake_query
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "src.db.session": fake_db_session_module,
+                    "src.db.models": fake_db_models_module,
+                },
+            ),
+            patch("sqlalchemy.select", return_value=fake_query),
+            patch("src.memory.conversation.add_turn", new=AsyncMock()),
+            patch("src.memory.conversation.get_conversation_history", new=AsyncMock(return_value=[])),
+            patch("src.repair.engine.maybe_handle_pending_repair", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._add_direct_response_to_session", new=AsyncMock()),
+            patch("src.agents.orchestrator._maybe_handle_pending_connected_gmail_send", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._maybe_handle_connected_gmail_check", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._maybe_handle_connected_calendar_check", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator._maybe_handle_connected_google_tasks_flow", new=AsyncMock(return_value=None)),
+            patch("src.agents.orchestrator.create_orchestrator_async", new=AsyncMock()) as mock_create_orchestrator,
+            patch.object(__import__("src.agents.orchestrator", fromlist=["settings"]).settings, "openrouter_image_enabled", False),
+        ):
+            result = await run_orchestrator(12345, "draw an image of a happy dog")
+
+        assert "Image generation is currently disabled in Atlas." in result
+        mock_create_orchestrator.assert_not_awaited()
 
 
 class TestDirectGoogleTasksFlow:
@@ -1259,3 +1479,57 @@ class TestSessionHistoryFiltering:
         result = _keep_recent_session_history([], [{"role": "user", "content": "hello"}])
         assert len(result) == 1
         assert result[0]["role"] == "user"
+
+
+class TestResponseHasToolError:
+    """Regression: _response_has_tool_error must NOT fire on org-setup summaries."""
+
+    def _check(self, text: str) -> bool:
+        from src.agents.orchestrator import _response_has_tool_error
+        return _response_has_tool_error(text)
+
+    def test_real_tool_error_is_detected(self) -> None:
+        assert self._check("The tool call failed with: connection error to MCP server.") is True
+
+    def test_traceback_is_detected(self) -> None:
+        assert self._check("Traceback (most recent call last): some error.") is True
+
+    def test_empty_string_is_not_detected(self) -> None:
+        assert self._check("") is False
+
+    # --- Regression: org-setup summary suppression ---
+
+    def test_project_created_summary_not_detected(self) -> None:
+        summary = (
+            "✅ **Project created: FFmpeg Video Composer** (ID: 28)\n"
+            "**Goal:** Empower users to create polished videos.\n\n"
+            "**Agents (2):**\n  • MediaProcessor\n  • ProjectManager\n\n"
+            "**Validation issue:** subtitle_generator not installed for MediaProcessor"
+        )
+        assert self._check(summary) is False
+
+    def test_not_installed_in_setup_summary_not_detected(self) -> None:
+        assert self._check(
+            "✅ Project created: MyOrg (ID: 5)\n"
+            "⚠️ subtitle_generator is not installed for the MediaProcessor agent."
+        ) is False
+
+    def test_not_registered_in_setup_summary_not_detected(self) -> None:
+        assert self._check(
+            "**Skills (2 new, 0 reused):**\n"
+            "  ✅ subtitle-generator\n"
+            "  ⚠️ some-skill not registered\n"
+            "Tasks created: 4"
+        ) is False
+
+    def test_org_creation_summary_not_detected(self) -> None:
+        assert self._check(
+            "organization has been created with 2 agents and 5 tasks. "
+            "One validation issue: tool not installed."
+        ) is False
+
+    def test_cli_tools_line_not_detected(self) -> None:
+        assert self._check(
+            "**CLI Tools (1):**\n  ✅ ffmpeg_convert_video — registered\n"
+            "**Skills (1 new):** subtitle-generator"
+        ) is False

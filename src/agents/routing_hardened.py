@@ -26,6 +26,7 @@ class TaskDomain(Enum):
     ANALYSIS = "analysis"  # Data analysis, reports
     CREATIVE = "creative"  # Writing, content creation
     REPAIR = "repair"  # System debugging, diagnostics
+    ORG_PROJECT = "org_project"  # Organization/project/team setup, media automation
     GENERAL = "general"  # Default fallback
 
 
@@ -167,6 +168,24 @@ class HardenedClassifier:
             "verbs": {
                 "fix", "repair", "debug", "troubleshoot", "diagnose",
                 "resolve", "recover", "restore", "reset"
+            }
+        },
+        TaskDomain.ORG_PROJECT: {
+            "contexts": {
+                "organization", "org", "project", "team", "agent team",
+                "project team", "media", "video", "audio", "ffmpeg",
+                "imagemagick", "ffprobe", "sox", "yt-dlp", "convert",
+                "clip", "slideshow", "subtitle", "caption", "overlay",
+                "encode", "transcode", "codec", "bitrate", "resolution",
+                "aspect ratio", "reformat", "export", "compress",
+                "workflow", "pipeline", "automation", "batch",
+                "cli tool", "cli", "tool creation", "create tool",
+            },
+            "verbs": {
+                "set up", "setup", "create", "build", "establish",
+                "launch", "start", "initialize", "configure", "plan",
+                "generate", "produce", "make", "compose", "assemble",
+                "add agent", "add task", "assign", "create org",
             }
         }
     }
@@ -558,6 +577,23 @@ class ModelRouter:
         return config["model"], config
 
 
+# Fast-path keywords: if the message contains these, force MEDIUM routing
+# so the org agent and its tools are always available.
+_ORG_PROJECT_FAST_PATH_VERBS = (
+    "set up", "setup", "create a project", "create project",
+    "set up a project", "start a project", "build a project",
+    "create an organization", "create organization",
+    "new project", "new org", "create a team", "create team",
+    "build a team", "set up a team",
+)
+_ORG_PROJECT_FAST_PATH_CONTEXTS = (
+    "ffmpeg", "video composer", "media automation", "video editing",
+    "audio mixing", "image to video", "imagemagick", "ffprobe",
+    "yt-dlp", "batch processing", "codec", "transcode",
+    "from scratch", "example setup",
+)
+
+
 # Integration layer with existing system
 def classify_message_complexity_hardenened(user_message: str):
     """
@@ -566,11 +602,23 @@ def classify_message_complexity_hardenened(user_message: str):
     This function maintains backward compatibility while providing enhanced
     classification based on the research-backed system.
     """
-    # Import here to avoid circular import
     from src.models.router import TaskComplexity
-    
+
+    lowered = " ".join(user_message.strip().lower().split())
+
+    # Fast-path: project/org setup or media automation requests always need
+    # the org agent tools — force MEDIUM so the full toolset is available.
+    has_setup_verb = any(v in lowered for v in _ORG_PROJECT_FAST_PATH_VERBS)
+    has_media_context = any(c in lowered for c in _ORG_PROJECT_FAST_PATH_CONTEXTS)
+    if has_setup_verb or has_media_context:
+        return TaskComplexity.MEDIUM
+
     signal = HardenedClassifier.classify(user_message)
-    
+
+    # ORG_PROJECT domain always needs MEDIUM (tool-heavy multi-step)
+    if signal.domain == TaskDomain.ORG_PROJECT:
+        return TaskComplexity.MEDIUM
+
     # Map complexity score to TaskComplexity enum
     if signal.complexity_score >= 2.5:
         return TaskComplexity.HIGH

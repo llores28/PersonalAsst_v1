@@ -14,9 +14,7 @@ Security model:
 import logging
 from typing import Optional
 
-import redis.asyncio as aioredis
-
-from src.settings import settings
+from src.memory.conversation import get_redis
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +25,6 @@ def _key(tool_name: str) -> str:
     return f"{_VAULT_PREFIX}:{tool_name}"
 
 
-async def _get_redis() -> aioredis.Redis:
-    return aioredis.from_url(settings.redis_url, decode_responses=True)
-
-
 async def store_credential(tool_name: str, cred_name: str, cred_value: str) -> None:
     """Store a single credential for a tool.
 
@@ -39,9 +33,8 @@ async def store_credential(tool_name: str, cred_name: str, cred_value: str) -> N
         cred_name: Credential key (e.g. 'linkedin_email').
         cred_value: Secret value.
     """
-    r = await _get_redis()
+    r = await get_redis()
     await r.hset(_key(tool_name), cred_name, cred_value)
-    await r.aclose()
     logger.info("Credential '%s' stored for tool '%s'", cred_name, tool_name)
 
 
@@ -49,49 +42,43 @@ async def store_credentials(tool_name: str, creds: dict[str, str]) -> None:
     """Store multiple credentials for a tool at once."""
     if not creds:
         return
-    r = await _get_redis()
+    r = await get_redis()
     await r.hset(_key(tool_name), mapping=creds)
-    await r.aclose()
     logger.info("Stored %d credentials for tool '%s'", len(creds), tool_name)
 
 
 async def get_credential(tool_name: str, cred_name: str) -> Optional[str]:
     """Retrieve a single credential value."""
-    r = await _get_redis()
+    r = await get_redis()
     val = await r.hget(_key(tool_name), cred_name)
-    await r.aclose()
     return val
 
 
 async def get_credentials(tool_name: str) -> dict[str, str]:
     """Retrieve all credentials for a tool."""
-    r = await _get_redis()
+    r = await get_redis()
     creds = await r.hgetall(_key(tool_name))
-    await r.aclose()
     return creds
 
 
 async def delete_credential(tool_name: str, cred_name: str) -> None:
     """Delete a single credential."""
-    r = await _get_redis()
+    r = await get_redis()
     await r.hdel(_key(tool_name), cred_name)
-    await r.aclose()
     logger.info("Credential '%s' deleted for tool '%s'", cred_name, tool_name)
 
 
 async def delete_all_credentials(tool_name: str) -> None:
     """Delete all credentials for a tool."""
-    r = await _get_redis()
+    r = await get_redis()
     await r.delete(_key(tool_name))
-    await r.aclose()
     logger.info("All credentials deleted for tool '%s'", tool_name)
 
 
 async def list_credential_keys(tool_name: str) -> list[str]:
     """List credential keys (not values) for a tool."""
-    r = await _get_redis()
+    r = await get_redis()
     keys = await r.hkeys(_key(tool_name))
-    await r.aclose()
     return keys
 
 

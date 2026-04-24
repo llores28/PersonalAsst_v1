@@ -67,6 +67,8 @@ It also maintains conversation context — it remembers what you discussed in re
 | `/persona` | View or change assistant personality |
 | `/persona name Luna` | Change assistant's name |
 | `/persona style casual` | Change communication style |
+| `/voice` | View or set TTS voice for audio replies |
+| `/voice nova` | Set voice to Nova (alloy/echo/fable/nova/onyx/shimmer) |
 | `/schedules` | List all scheduled tasks |
 | `/cancel <id>` | Cancel a scheduled task |
 | `/orgs` | Manage organizations (list/create/info/pause/resume/delete) |
@@ -101,14 +103,49 @@ Would you like to send it?"
 
 Just say "send it", "yes", or "cancel".
 
-### Voice Messages
+### Voice Messages & Audio Replies
 
-Send a voice message in Telegram — the assistant will transcribe it and respond as text.
+Send a voice message in Telegram — the assistant will transcribe it via Whisper and respond. When you send a voice message, Atlas will automatically reply with both text and a voice message.
+
+You can also request audio replies for text conversations:
+- "reply with audio: tell me a joke"
+- "say it: what's the weather like?"
+- "voice reply: what can you do?"
+
+Use `/voice` to pick your preferred voice for audio replies.
+
+### Image Generation
+
+Ask Atlas to create images naturally:
+- "create an image of a sunset over the mountains"
+- "generate a logo for a tech startup, landscape"
+- "draw a cute cat playing with yarn, square"
+
+Atlas uses Google Gemini via OpenRouter. Generated images are sent as Telegram photos.
+
+### Photo Analysis
+
+Send any photo to Atlas and ask about it:
+- Send a photo with no caption → Atlas describes it
+- Send with caption: "What breed is this dog?"
+- Send with caption: "Read the text in this image"
+- Send with caption: "How many people are in this photo?"
 
 ### File Sharing
 
 - **Send a file** to the bot → it can upload to Google Drive
 - **Ask for a file** → it will find and send it from Google Drive
+
+### Web Dashboard
+
+Access the Dashboard at **http://localhost:3001** for a visual overview of your assistant:
+
+- **Overview tab** — Draggable, resizable tiles showing cost trends, quality scores, registered tools, scheduled jobs, budget status, and persona info. Rearrange tiles by dragging their headers. Your layout is saved automatically.
+- **Organizations tab** — Create and manage project organizations. When deleting, a preview dialog shows exactly what will be removed — check items you want to keep.
+- **Tools tab** — View registered tools. Click **AI Wizard** to create a new tool via guided interview.
+- **Repairs tab** — View repair tickets. Click **New Ticket** to open one manually (choose AI Agent or Admin pipeline).
+- **Activity tab** — Click any row for a step-by-step trace of what the agent did.
+- **Jobs tab** — Monitor background jobs with progress bars and cancel buttons.
 
 ### Error Diagnostics
 
@@ -125,6 +162,9 @@ If something goes wrong, the assistant can help diagnose:
 - **Give feedback:** The assistant learns from your preferences over time
 - **Say "send it"** after reviewing a draft — no need to repeat the full request
 - **Say "retry"** if something fails — the assistant will try again
+- **Add "landscape" or "portrait"** to image prompts for better aspect ratios
+- **Say "reply with audio"** or send a voice message to get voice replies
+- **Use `/voice`** to pick your preferred Atlas voice (nova is friendly, onyx is deep)
 
 ## Privacy & Safety
 

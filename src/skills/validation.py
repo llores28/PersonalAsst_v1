@@ -65,7 +65,7 @@ async def validate_skill(
     Returns:
         List of test results
     """
-    skill_path = Path(f"user_skills/{skill_id}")
+    skill_path = Path(f"src/user_skills/{skill_id}")
     if not skill_path.exists():
         raise ValueError(f"Skill not found: {skill_id}")
 
@@ -110,7 +110,7 @@ async def _run_test_case(skill_id: str, test_case: SkillTestCase) -> SkillTestRe
     start_time = time.time()
 
     try:
-        skill_path = Path(f"user_skills/{skill_id}")
+        skill_path = Path(f"src/user_skills/{skill_id}")
         loader = SkillLoader()
         skill = loader.load_from_path(skill_path)
 
@@ -201,7 +201,7 @@ async def quick_test_skill(skill_id: str, test_input: str) -> dict:
         Dict with routing_confidence, would_trigger, and suggestions
     """
     try:
-        skill_path = Path(f"user_skills/{skill_id}")
+        skill_path = Path(f"src/user_skills/{skill_id}")
         if not skill_path.exists():
             return {"error": f"Skill {skill_id} not found"}
 

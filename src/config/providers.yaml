@@ -1,0 +1,114 @@
+# LLM Provider Configuration
+#
+# This file defines additional LLM providers for Atlas multi-LLM support.
+# Built-in providers (openai, anthropic, openrouter, google, local) are
+# pre-configured in src/models/provider_resolution.py.
+#
+# To add custom providers, append to the 'providers' list below.
+# Environment variables in ${VAR_NAME} format will be resolved at runtime.
+
+# Leave providers list empty to use only built-in providers
+providers: []
+
+# Provider Model Aliases
+# Define model name aliases for consistent routing across providers.
+  # Example: Custom OpenAI-compatible endpoint (e.g., Azure, proxy)
+  # - name: azure_openai
+  #   api_mode: openai
+  #   base_url: ${AZURE_OPENAI_ENDPOINT}/openai/deployments/gpt-5.4
+  #   supports_tools: true
+  #   supports_streaming: true
+  #   default_model: gpt-5.4
+  #   cost_per_1k_input: 0.005
+  #   cost_per_1k_output: 0.015
+  #   api_key_env_var: AZURE_OPENAI_KEY
+
+  # Example: Groq (fast inference)
+  # - name: groq
+  #   api_mode: openai
+  #   base_url: https://api.groq.com/openai/v1
+  #   supports_tools: true
+  #   supports_streaming: true
+  #   default_model: llama-3.1-70b-versatile
+  #   cost_per_1k_input: 0.00059
+  #   cost_per_1k_output: 0.00079
+  #   api_key_env_var: GROQ_API_KEY
+
+  # Example: Together AI
+  # - name: together
+  #   api_mode: openai
+  #   base_url: https://api.together.xyz/v1
+  #   supports_tools: false
+  #   supports_streaming: true
+  #   default_model: meta-llama/Llama-3.1-70B
+  #   cost_per_1k_input: 0.00088
+  #   cost_per_1k_output: 0.00088
+  #   api_key_env_var: TOGETHER_API_KEY
+
+  # Example: Fireworks AI
+  # - name: fireworks
+  #   api_mode: openai
+  #   base_url: https://api.fireworks.ai/inference/v1
+  #   supports_tools: true
+  #   supports_streaming: true
+  #   default_model: accounts/fireworks/models/llama-v3p1-70b-instruct
+  #   cost_per_1k_input: 0.0009
+  #   cost_per_1k_output: 0.0009
+  #   api_key_env_var: FIREWORKS_API_KEY
+
+# Provider Model Aliases
+# Define model name aliases for consistent routing across providers.
+# Atlas uses these to map logical model names to provider-specific IDs.
+
+model_aliases:
+  # Fast/cheap models
+  fast:
+    openai: gpt-5.4-nano
+    anthropic: claude-haiku
+    openrouter: google/gemma-2-9b-it
+    google: gemini-1.5-flash
+
+  # Balanced models (default)
+  balanced:
+    openai: gpt-5.4-mini
+    anthropic: claude-sonnet-4-6
+    openrouter: anthropic/claude-sonnet-4
+    google: gemini-2.0-flash
+
+  # High quality models
+  high:
+    openai: gpt-5.4
+    anthropic: claude-opus-4-6
+    openrouter: anthropic/claude-opus-4-6
+    google: gemini-2.5-pro
+
+  # Reasoning/thinking models
+  reasoning:
+    openai: gpt-5.4
+    anthropic: claude-opus-4-6-thinking
+    openrouter: openai/o3-mini
+    google: gemini-2.5-pro
+
+# Provider Selection Hints
+# Help Atlas choose the right provider for specific task types.
+
+provider_hints:
+  coding:
+    preferred: [openai, anthropic, openrouter]
+    reason: "Best tool use support"
+  
+  long_context:
+    preferred: [anthropic, google]
+    reason: "Large context windows (200k+ tokens)"
+  
+  fast_inference:
+    preferred: [openai, google]
+    reason: "Low latency for quick responses"
+  
+  cost_sensitive:
+    preferred: [google, openrouter]
+    reason: "Lower per-token costs"
+  
+  local_privacy:
+    preferred: [local]
+    reason: "Data never leaves your machine"

@@ -43,6 +43,9 @@ class User(Base):
     persona_interviews: Mapped[list["PersonaInterview"]] = relationship(
         back_populates="user"
     )
+    settings: Mapped[Optional["UserSettings"]] = relationship(
+        back_populates="user", uselist=False
+    )
 
 
 class PersonaVersion(Base):
@@ -117,7 +120,7 @@ class Tool(Base):
 class RepairTicket(Base):
     """Represents a repair ticket created from an error analysis and fix plan.
 
-    Lifecycle: open → plan_ready → verifying → verification_failed → ready_for_deploy → deployed/closed
+    Lifecycle: open → debug_analysis_ready → plan_ready → verifying → verification_failed → ready_for_deploy → deployed/closed
     """
     __tablename__ = "repair_tickets"
 
@@ -132,6 +135,7 @@ class RepairTicket(Base):
 
     # Context and artifacts
     error_context: Mapped[Optional[dict]] = mapped_column(JSONB)
+    debug_analysis: Mapped[Optional[dict]] = mapped_column(JSONB)  # Structured analysis from DebuggerAgent
     plan: Mapped[Optional[dict]] = mapped_column(JSONB)
     branch_name: Mapped[Optional[str]] = mapped_column(String(120))
     verification_results: Mapped[Optional[dict]] = mapped_column(JSONB)
@@ -295,7 +299,7 @@ class OwnerSecurityConfig(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     pin_hash: Mapped[Optional[str]] = mapped_column(String(128))
     security_qa: Mapped[Optional[dict]] = mapped_column(JSONB)
-    challenge_ttl: Mapped[int] = mapped_column(Integer, default=60)
+    challenge_ttl: Mapped[int] = mapped_column(Integer, default=300)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -304,7 +308,7 @@ class OwnerSecurityConfig(Base):
 class MarketplaceSkill(Base):
     """Registry entry for a skill in the marketplace."""
     __tablename__ = "marketplace_skills"
-    __table_args__ = (UniqueConstraint("id", "version"),)
+    __table_args__ = (UniqueConstraint("name", "version"),)
 
     id: Mapped[str] = mapped_column(String(100), primary_key=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -359,3 +363,20 @@ class InstalledSkill(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
     last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class UserSettings(Base):
+    """User-specific settings including budget caps."""
+    __tablename__ = "user_settings"
+    __table_args__ = (UniqueConstraint("user_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    daily_cost_cap_usd: Mapped[float] = mapped_column(Numeric(10, 2), default=5.00)
+    monthly_cost_cap_usd: Mapped[float] = mapped_column(Numeric(10, 2), default=100.00)
+    tts_voice: Mapped[str] = mapped_column(String(20), server_default="alloy", nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    user: Mapped["User"] = relationship(back_populates="settings")

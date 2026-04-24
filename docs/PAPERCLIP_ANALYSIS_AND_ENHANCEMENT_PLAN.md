@@ -1,198 +1,208 @@
-# PersonalAsst Enhancement Plan Based on PaperClip Analysis
+# PersonalAsst — Advanced Organization Wizard Plan
+## (Based on PaperClip Analysis · Updated April 13, 2026)
 
-## Executive Summary
+> **Scope note:** The Organization Wizard feature (multi-step UI to create orgs + assign agents) is **not yet implemented**. The basic Org CRUD and the Agents tab in the Dashboard are complete. This plan covers what remains.
 
-After deep research into PaperClip's agent orchestration platform, I've identified key architectural improvements that can transform PersonalAsst from a single-user assistant into a multi-agent orchestration system while maintaining Docker deployment and security sandboxing.
+---
 
-## Key Insights from PaperClip
+## Current State (April 13, 2026)
 
-### 1. **Organizational Structure**
-- **Org Chart for Agents**: Hierarchies, roles, reporting lines
-- **Governance Layer**: Human at the top, with approval gates
-- **Multi-Company Runtime**: Complete isolation between businesses
+### ✅ Already Built
+| Feature | Location |
+|---|---|
+| Organizations CRUD (create, pause, resume, delete) | `src/orchestration/api.py` + `src/db/models.py` (Org, OrgAgent) |
+| OrgAgent create/update/delete | `src/orchestration/api.py` |
+| Telegram `/orgs` lifecycle commands | `src/bot/handlers.py` |
+| Agents tab in Dashboard (system + org agents) | `src/orchestration-ui/src/Dashboard.js` — `AgentsTab` |
+| System agent registry | `src/orchestration/system_agents.py` |
+| Durable delete audit trail | `audit_log` table via `src/orchestration/api.py` |
+| Org ownership scoping (X-Telegram-Id) | `src/orchestration/api.py` |
+| Active-org agent deletion guard (409) | `src/orchestration/api.py` |
+| M1 Parallel fan-out | `src/agents/parallel_runner.py` |
+| M2 Autonomous background jobs | `src/agents/background_job.py` |
+| M3 Agent trace persistence | `src/db/models.py` AgentTrace + `src/orchestration/api.py` |
+| M4 Risk-classified self-healing | `src/repair/engine.py` + `src/repair/verifier.py` |
+| FastAPI Dashboard API | `src/orchestration/api.py` (port 8000) |
+| React Dashboard UI (9 tabs) | `src/orchestration-ui/src/Dashboard.js` (port 3001) |
 
-### 2. **Execution Model**
-- **Atomic Execution**: Task checkout prevents duplicate work
-- **Persistent Agent State**: Agents resume context across heartbeats
-- **Goal-Aware Execution**: Tasks carry full goal ancestry
-- **Cost Control**: Per-agent budgets with enforcement
+### ❌ Not Yet Built — Advanced Organization Wizard
+The wizard is a multi-step onboarding flow for creating an organization with agents in a single guided experience, rather than the current separate Org create + manual agent assignment.
 
-### 3. **Technical Architecture**
-- **Node.js + PostgreSQL**: Embedded DB for local, external for production
-- **React UI**: Web-based management interface
-- **Bring Your Own Agent**: Supports Claude Code, OpenClaw, custom agents
+---
 
-## Proposed Enhancements for PersonalAsst
+## Project Structure (Updated April 13, 2026)
 
-### Phase 1: Agent Organization & Governance (High Priority)
+All deployment files live under `src/`. Root contains only project-level files.
 
-#### 1.1 Agent Registry & Org Chart
-```python
-# src/orchestration/agent_registry.py
-@dataclass
-class AgentDefinition:
-    id: str
-    name: str
-    role: AgentRole  # CEO, CTO, Developer, Analyst, etc.
-    capabilities: List[str]
-    budget_monthly: float
-    parent_agent_id: Optional[str] = None
-    company_id: str = "personal"
-
-class AgentRegistry:
-    def create_agent(self, definition: AgentDefinition) -> Agent
-    def get_org_chart(self, company_id: str) -> OrgChart
-    def assign_task(self, task: Task, agent_id: str) -> bool
+```
+src/
+├── orchestration-ui/src/Dashboard.js   # React UI — 9 tabs incl. Agents tab
+├── orchestration/
+│   ├── api.py                          # All /api/* endpoints
+│   └── system_agents.py               # Built-in system agent registry
+├── agents/                             # 19 agents (orchestrator, skills, handoffs, etc.)
+├── db/
+│   └── models.py                       # Org, OrgAgent, AgentTrace, BackgroundJob, ...
+├── config/                             # persona_default.yaml, safety policies
+├── user_skills/                        # User-created SKILL.md files (volume-mounted)
+├── alembic.ini                         # Alembic config (script_location = src/db/migrations)
+└── alembic/                            # Migration env + versions
 ```
 
-#### 1.2 Task Management with Goal Ancestry
+Docker Compose services (all use `COPY src/ ./src/`):
+- `orchestration-api` — build context: repo root → `Dockerfile.orchestration`
+- `orchestration-ui` — build context: `./src/orchestration-ui`
+- `assistant` — build context: repo root → `Dockerfile`
+
+---
+
+## What Remains: Advanced Organization Wizard
+
+### Phase 1 — Wizard UI (Dashboard)
+
+**Goal:** Replace the current two-step "Create Org → then manually add agents" flow with a 3-step wizard modal inside the Dashboard Agents tab (or Orgs tab).
+
+#### Step 1: Organization Identity
+- Name, description, status (active/paused)
+- Industry / purpose (optional)
+
+#### Step 2: Assign Agents
+- Multi-select from the system agent registry (`GET /api/agents/system`)
+- Show agent capabilities and tool counts
+- Optionally set agent role/instructions for this org context
+
+#### Step 3: Review & Create
+- Summary card before submit
+- `POST /api/orgs` → then `POST /api/orgs/{id}/agents` for each selected agent
+- Redirect to Orgs tab on success
+
+**Files to add/change:**
+```
+src/orchestration-ui/src/Dashboard.js    # Add OrgWizardDialog component
+```
+
+**No backend changes needed** — existing endpoints are sufficient.
+
+---
+
+### Phase 2 — Governance Layer (Future)
+
+Org-level human approval gates for agent actions (inspired by PaperClip):
+
 ```python
-# src/orchestration/task_manager.py
+# src/orchestration/governance.py  (not yet created)
+class GovernanceLayer:
+    async def approve_agent_action(self, org_id: int, action: str) -> bool
+    async def override_budget(self, org_id: int, new_budget: float) -> bool
+    async def pause_agent(self, org_id: int, agent_id: int, reason: str) -> bool
+```
+
+DB changes needed: `approval_gates` table, `org_budget` column on `Org`.
+
+---
+
+### Phase 3 — Per-Org Task Queue (Future)
+
+Goal-ancestry task tracking per organization, inspired by PaperClip's atomic execution model:
+
+```python
+# src/orchestration/task_manager.py  (not yet created)
 @dataclass
-class Task:
+class OrgTask:
     id: str
+    org_id: int
     title: str
-    description: str
-    goal_ancestry: List[str]  # ["company:mrr", "project:collab", "task:websocket"]
-    assigned_agent_id: Optional[str]
+    goal_ancestry: list[str]     # e.g. ["org:sales", "goal:outreach", "task:email-draft"]
+    assigned_agent_id: int | None
     status: TaskStatus
     budget_allocated: float
-    created_at: datetime
-    
-class TaskManager:
-    def create_task(self, task: Task) -> str
-    def assign_task(self, task_id: str, agent_id: str) -> bool
-    def get_agent_workload(self, agent_id: str) -> Workload
 ```
 
-#### 1.3 Governance Layer
+DB changes needed: `org_tasks` table + Alembic migration.
+
+---
+
+### Phase 4 — Cost Control Per Org (Future)
+
 ```python
-# src/orchestration/governance.py
-class GovernanceLayer:
-    def approve_hiring(self, agent_def: AgentDefinition) -> bool
-    def approve_strategy(self, strategy: Strategy) -> bool
-    def override_budget(self, agent_id: str, new_budget: float) -> bool
-    def pause_agent(self, agent_id: str, reason: str) -> bool
+# src/orchestration/budget_manager.py  (not yet created)
+class OrgBudgetManager:
+    async def track_usage(self, org_id: int, agent_id: int, cost: float) -> None
+    async def enforce_budget(self, org_id: int) -> bool
+    async def get_spend_report(self, org_id: int) -> SpendReport
 ```
 
-### Phase 2: Web UI & Dashboard (Medium Priority)
+Requires: `org_spend` table + `daily_cost_cap` column on `Org`.
 
-#### 2.1 React Dashboard
-- Agent org chart visualization
-- Task queue and assignment view
-- Real-time cost monitoring
-- Goal hierarchy display
+---
 
-#### 2.2 API Endpoints
-```python
-# src/api/orchestration_api.py
-@app.get("/api/companies/{company_id}/agents")
-def get_agents(company_id: str) -> List[Agent]
+## Docker Deployment (Current — No Changes Needed for Wizard)
 
-@app.get("/api/companies/{company_id}/tasks")
-def get_tasks(company_id: str) -> List[Task]
-
-@app.post("/api/tasks/{task_id}/assign")
-def assign_task(task_id: str, agent_id: str) -> Task
-```
-
-### Phase 3: Advanced Features (Future)
-
-#### 3.1 Multi-Agent Coordination
-```python
-# src/orchestration/coordinator.py
-class AgentCoordinator:
-    def coordinate_agents(self, task: Task) -> CoordinationPlan
-    def resolve_conflicts(self, conflicts: List[Conflict]) -> Resolution
-    def optimize_workload(self) -> OptimizationPlan
-```
-
-#### 3.2 Cost Control & Budgeting
-```python
-# src/orchestration/budget_manager.py
-class BudgetManager:
-    def track_usage(self, agent_id: str, cost: float) -> None
-    def enforce_budget(self, agent_id: str) -> bool
-    def get_spend_report(self, company_id: str) -> SpendReport
-```
-
-## Implementation Strategy
-
-### Step 1: Refactor Current Architecture
-1. Extract agent definitions from orchestrator.py
-2. Create agent registry system
-3. Implement task queue with goal ancestry
-
-### Step 2: Add Web Interface
-1. Create FastAPI backend
-2. Build React dashboard
-3. Add real-time updates with WebSocket
-
-### Step 3: Enhance Security & Isolation
-1. Per-company database schemas
-2. Agent sandboxing improvements
-3. Audit logging system
-
-## Security Considerations
-
-### Maintaining Current Security Model
-- Keep Docker containerization
-- Preserve input/output guardrails
-- Maintain cost caps and user allowlists
-
-### New Security Measures
-- Agent-to-agent communication validation
-- Task assignment authorization
-- Budget enforcement at infrastructure level
-
-## Docker Deployment Updates
-
-### New Container Services
 ```yaml
-# docker-compose.yml (enhanced)
+# docker-compose.yml (current, correct)
 services:
-  assistant:
-    # Existing PersonalAsst service
-  
   orchestration-api:
-    build: ./orchestration
-    environment:
-      - DATABASE_URL=postgresql://user:pass@postgres:5432/assistant
-    depends_on:
-      - postgres
-      - redis
-  
+    build:
+      context: .
+      dockerfile: Dockerfile.orchestration
+    ports: ["8000:8000"]
+
   orchestration-ui:
-    build: ./orchestration-ui
-    ports:
-      - "3000:3000"
-    depends_on:
-      - orchestration-api
+    build:
+      context: ./src/orchestration-ui   # ← updated April 13
+    ports: ["3001:80"]
+
+  assistant:
+    build:
+      context: .
+      dockerfile: Dockerfile
 ```
 
-## Benefits of This Approach
+The wizard UI only requires changes inside `src/orchestration-ui/src/Dashboard.js`.  
+No new containers, no new Dockerfiles, no new backend endpoints for Phase 1.
 
-1. **Scalability**: Multiple agents working in coordination
-2. **Governance**: Human oversight with approval gates
-3. **Cost Control**: Per-agent budgets with enforcement
-4. **Observability**: Full audit trail of all decisions
-5. **Flexibility**: Bring your own agent runtime
-6. **Isolation**: Multi-company support with data separation
+---
 
-## Migration Path
+## Security Constraints (Unchanged)
 
-1. **Backward Compatibility**: Current Telegram interface continues working
-2. **Gradual Rollout**: New features behind feature flags
-3. **Data Migration**: Existing data preserved and enhanced
-4. **Testing**: Comprehensive test suite for orchestration layer
+- Single-user system — no multi-tenancy at auth layer
+- All org operations scoped to `X-Telegram-Id` owner resolution
+- Agent deletion blocked if org is `active` (409 guard)
+- Audit log entries written before any destructive operation
+- No agent-to-agent communication without orchestrator mediation
 
-## Conclusion
+---
 
-By adopting PaperClip's orchestration principles while maintaining PersonalAsst's security-first approach, we can create a powerful multi-agent system that:
-- Scales from single-user to enterprise
-- Maintains Docker deployment simplicity
-- Preserves security sandboxing
-- Adds organizational structure and governance
-- Provides web-based management interface
+## Implementation Priority
 
-This transformation positions PersonalAsst as a serious contender in the AI agent orchestration space while keeping its core strengths intact.
+| Phase | Effort | Status |
+|---|---|---|
+| Wizard UI (3-step modal) | Dashboard.js + `POST /api/orgs/wizard` | ✅ **Completed April 13, 2026** |
+| Governance Layer | Medium — new module + DB migration | Future |
+| Per-Org Task Queue | Medium — new model + API endpoints | Future |
+| Cost Control Per Org | Medium — new model + budget tracking | Future |
+
+---
+
+## Phase 1 — Implementation Notes (April 13, 2026)
+
+### Backend
+- **`POST /api/orgs/wizard`** added to `src/orchestration/api.py` — registered *before* parameterized routes to avoid FastAPI path-param collisions.
+- **`OrgWizardRequest`** / **`OrgWizardResponse`** / **`WizardAgentConfig`** Pydantic models added to `api.py`.
+- Atomic transaction: org row created → activity logged → OrgAgent rows created for each selected system agent → activity logged → single `commit()`.
+- `get_system_agent_by_id` added to top-level import from `system_agents.py`.
+
+### Frontend (`src/orchestration-ui/src/Dashboard.js`)
+- **`OrgWizardDialog`** component added (~265 lines) with `MUI Stepper` (3 steps).
+- **Step 0 (Identity):** Name (required), Goal, Description.
+- **Step 1 (Agents):** Multi-select cards grouped by category (Google Workspace / Internal / Utility). Checkbox + click-to-toggle. Live count badge.
+- **Step 2 (Review):** Org summary card + agent list with per-agent optional role override field. Submit calls `POST /api/orgs/wizard`.
+- `OrgsTab` "New Organization" button now opens `OrgWizardDialog` instead of the old `OrgForm` dialog.
+- Old `orgDialogOpen` state and `OrgForm` dialog removed from `Dashboard`.
+- New MUI imports: `Stepper`, `Step`, `StepLabel`, `Checkbox`, `ListItemButton`, `ListItemIcon`, `Divider`, `AutoAwesome`, `Group`.
+
+### Smoke Test
+```
+POST /api/orgs/wizard  →  {"org_id": N, "org_name": "...", "status": "active", "agents_created": 2, "agent_names": [...]}
+```
+Verified atomically creates org + 2 OrgAgent rows + 2 audit log entries in one DB transaction.

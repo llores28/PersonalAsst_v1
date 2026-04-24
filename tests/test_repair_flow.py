@@ -139,16 +139,14 @@ class TestRepairApprovalFlow:
                         (0, "", ""),              # git add
                         (0, "", ""),              # git commit
                         (0, "ok", ""),            # verification command
-                        (0, "", ""),              # git checkout main
-                        (0, "", ""),              # git merge --ff-only
-                        (0, "", ""),              # git branch -d
+                        (0, "", ""),              # git checkout main (back to original)
                     ]
                 ),
             ),
         ):
             result = await engine.execute_pending_repair(123)
 
-        assert "Repair Applied" in result
+        assert "Patch Verified" in result or "ready" in result.lower()
         assert "src/example.py" in result
         mock_clear.assert_awaited_once_with(123)
 

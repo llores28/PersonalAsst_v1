@@ -26,11 +26,19 @@ ENV/
 *.swo
 *~
 
-# Windsurf IDE metadata (local only)
-.windsurf/
+# Claude Code per-user state (project-shared settings.json IS committed)
+.claude/settings.local.json
 
-# Bootstrap dev tooling (keep locally, don't publish)
-bootstrap/
+# Vendored external git repos (convert to submodule before tracking)
+bootstrap/Nexus/
+
+# Windsurf rules/skills/workflows ARE committed (they form the Nexus operating system)
+# .windsurf/  <-- intentionally tracked
+
+# Bootstrap CLI toolkit IS committed (needed for smoketest/health/debug commands)
+# bootstrap/  <-- intentionally tracked
+
+# But exclude leftover bootstrap backup dirs
 bootstrap-backup*/
 bootstrap_backup*/
 
@@ -44,6 +52,8 @@ redis_data/
 htmlcov/
 .coverage
 coverage.xml
+test_output.txt
+test_output_*.txt
 
 # OS
 .DS_Store
@@ -54,12 +64,18 @@ desktop.ini
 *.db
 *.sqlite3
 
+# Private key / certificate files
+*.key
+*.pem
+*.p12
+*.pfx
+
 # Tool outputs
 tools/*/output/
 
 # Frontend build artifacts
-orchestration-ui/node_modules/
-orchestration-ui/build/
+src/orchestration-ui/node_modules/
+src/orchestration-ui/build/
 
 # Temp / cache dirs
 .tmp/

@@ -7,7 +7,8 @@ pydantic-settings>=2.7.0
 # Database
 sqlalchemy[asyncio]>=2.0.36
 asyncpg>=0.30.0
-psycopg2-binary>=2.9.7
+# psycopg2-binary 2.9.7 has no Python 3.12 wheel; 2.9.11 ships cp312 manylinux wheels
+psycopg2-binary>=2.9.11
 alembic>=1.14.0
 
 # Memory
@@ -34,10 +35,18 @@ playwright>=1.40.0
 # LLM-ready web scraping (uses Playwright under the hood)
 crawl4ai>=0.8.0
 
+# Retry / resilience
+tenacity>=9.0.0
+
 # Utilities
 pyyaml>=6.0.2
 watchdog>=6.0.0
 httpx>=0.28.0
+
+# Optional - Multi-LLM Provider Support
+# Install these to enable additional LLM providers beyond OpenAI
+# anthropic>=0.40.0    # For Claude support
+# google-genai>=0.3.0  # For Gemini support
 
 # Dev / Test (install separately or via pip install -r requirements-dev.txt)
 # pytest>=8.3.0

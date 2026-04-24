@@ -18,18 +18,12 @@ import logging
 import secrets
 from typing import Optional
 
-import redis.asyncio as aioredis
-
-from src.settings import settings
+from src.memory.conversation import get_redis
 
 logger = logging.getLogger(__name__)
 
 _CHALLENGE_KEY_PREFIX = "repair_challenge:"
-_DEFAULT_TTL = 60  # seconds
-
-
-def _redis() -> aioredis.Redis:
-    return aioredis.from_url(settings.redis_url, decode_responses=True)
+_DEFAULT_TTL = 300  # seconds — 5 minutes to reply with PIN
 
 
 def _hash_answer(answer: str) -> str:
@@ -61,7 +55,7 @@ async def issue_challenge(
             "Use /settings security to set one up before approving repairs."
         )
 
-    r = _redis()
+    r = await get_redis()
     key = f"{_CHALLENGE_KEY_PREFIX}{user_id}"
 
     if pin_hash:
@@ -87,13 +81,26 @@ async def issue_challenge(
         }
 
     await r.set(key, json.dumps(challenge), ex=ttl)
-    await r.aclose()
 
     return {
         "type": challenge["type"],
         "prompt": challenge["prompt"],
         "expires_in": ttl,
     }
+
+
+# ── Check ───────────────────────────────────────────────────────────────
+
+async def has_pending_challenge(user_id: int) -> bool:
+    """Check if a challenge is pending for the user.
+    
+    Returns True if there's an active (non-expired) challenge waiting
+    for verification.
+    """
+    r = await get_redis()
+    key = f"{_CHALLENGE_KEY_PREFIX}{user_id}"
+    raw = await r.get(key)
+    return raw is not None
 
 
 # ── Verify ─────────────────────────────────────────────────────────────
@@ -104,13 +111,12 @@ async def verify_challenge(user_id: int, answer: str) -> bool:
     Returns ``True`` on success (and clears the challenge).
     Returns ``False`` on wrong answer or expired/missing challenge.
     """
-    r = _redis()
+    r = await get_redis()
     key = f"{_CHALLENGE_KEY_PREFIX}{user_id}"
 
     raw = await r.get(key)
     if raw is None:
         logger.warning("No pending challenge for user %s (expired?)", user_id)
-        await r.aclose()
         return False
 
     challenge = json.loads(raw)
@@ -119,12 +125,10 @@ async def verify_challenge(user_id: int, answer: str) -> bool:
 
     if actual == expected:
         await r.delete(key)
-        await r.aclose()
         logger.info("Security challenge passed for user %s", user_id)
         return True
 
     logger.warning("Security challenge FAILED for user %s", user_id)
-    await r.aclose()
     return False
 
 
@@ -140,10 +144,3 @@ def hash_security_answer(answer: str) -> str:
     return _hash_answer(answer)
 
 
-async def has_pending_challenge(user_id: int) -> bool:
-    """Check if there is an active pending challenge for a user."""
-    r = _redis()
-    key = f"{_CHALLENGE_KEY_PREFIX}{user_id}"
-    exists = await r.exists(key)
-    await r.aclose()
-    return bool(exists)

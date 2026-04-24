@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from src.settings import settings
 from src.skills.definition import SkillDefinition, SkillGroup, SkillSourceType
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,10 @@ class SkillLoader:
         Args:
             user_skills_dir: Base directory for user-created skills
         """
-        self.user_skills_dir = user_skills_dir or Path("/app/user_skills")
+        _default_dir = (
+            Path(__file__).resolve().parents[2] / settings.user_skills_dir
+        )
+        self.user_skills_dir = user_skills_dir or _default_dir
         self._cache: dict[str, ParsedSkill] = {}
 
     def load_from_path(
@@ -241,6 +245,16 @@ class SkillLoader:
                     value = value[1:-1]
                 elif value and value[0] == value[-1] == "'":
                     value = value[1:-1]
+
+                # Handle inline JSON-like lists (e.g., [a, b] or [])
+                if isinstance(value, str) and value.startswith("[") and value.endswith("]"):
+                    import json as _json
+                    try:
+                        parsed = _json.loads(value)
+                        if isinstance(parsed, list):
+                            value = [str(x) for x in parsed]
+                    except (ValueError, TypeError):
+                        pass
 
                 # Handle booleans
                 if isinstance(value, str) and value.lower() == "true":

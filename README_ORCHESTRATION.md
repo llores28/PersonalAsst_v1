@@ -27,6 +27,24 @@ PersonalAsst has been enhanced with PaperClip-inspired agent orchestration capab
 - **Real-time Updates**: WebSocket-based live dashboard
 - **Mobile Ready**: Access orchestration from any device
 
+## Tasks vs Scheduled Jobs vs Background Jobs
+
+Atlas has **three distinct concepts** that are easy to confuse. The Dashboard surfaces all three, and each lives in its own table in Postgres:
+
+| Concept | Table | Trigger | Typical example | Where to see it |
+|---|---|---|---|---|
+| **Organization Task** | `org_tasks` | Manual or agent-created; marked `pending → in_progress → completed` | "Write the FFmpeg preset guide" inside the FFmpeg Video Composer org | Click an Organization in the **Organizations** tab |
+| **Scheduled Job** | `scheduled_tasks` | Time (APScheduler cron/interval/once) | "Remind me every Monday at 9am to send the weekly summary" | `/schedules` from Telegram; internal to the scheduler |
+| **Background Job** | `background_jobs` | Event-driven long-running loop with tick + termination condition | "Monitor my inbox until John replies, then notify me" | **Jobs** tab in the Dashboard |
+
+### When to use which
+
+- **Task** — Something *someone* (you or an agent) should do as part of a project. Owns a title, priority, optional assignee, and completion state. Created via `setup_org_project`, the Organizations dialog, or the `add_org_task` tool.
+- **Scheduled Job** — Something that should fire *at a point in time*, repeatedly or once. Owns a cron/interval/once trigger. Created via natural language ("remind me…") or `/schedule`.
+- **Background Job** — Something that should *keep running* in the background until a condition is met. Has its own tick loop, fault tolerance, and notification on completion. Created automatically when you say "monitor…" / "watch…" / "keep checking…".
+
+All three are fully independent — a single workflow can combine them (e.g. a Task is unblocked by a Scheduled Job which itself kicks off a Background Job).
+
 ## Architecture
 
 ```
@@ -348,26 +366,79 @@ python -m pytest tests/test_orchestration.py -v
 python -m pytest tests/test_integration.py -v
 ```
 
+## Dashboard Enhancement APIs (April 2026)
+
+### Layout Persistence
+```bash
+# Get saved layout
+curl http://localhost:8000/api/dashboard/layout \
+  -H "X-Telegram-Id: 123456789"
+
+# Save layout
+curl -X PUT http://localhost:8000/api/dashboard/layout \
+  -H "Content-Type: application/json" \
+  -H "X-Telegram-Id: 123456789" \
+  -d '{"layouts": {"lg": [...], "md": [...], "sm": [...]}}'
+```
+
+### Selective Org Deletion
+```bash
+# Preview what will be deleted
+curl http://localhost:8000/api/orgs/42/delete-preview
+
+# Delete with retention
+curl -X DELETE http://localhost:8000/api/orgs/42 \
+  -H "Content-Type: application/json" \
+  -d '{"retain_agent_ids": [1, 3], "retain_task_ids": [5]}'
+```
+
+### Activity Feed
+```bash
+# Get recent activity (defaults: all directions, limit 50)
+curl "http://localhost:8000/api/activity?direction=inbound&limit=20"
+```
+
+### Tool Wizard
+```bash
+# Generate a tool from interview answers
+curl -X POST http://localhost:8000/api/tools/wizard/generate \
+  -H "Content-Type: application/json" \
+  -d '{"answers": {"name": "my_tool", "description": "...", ...}}'
+```
+
+### Manual Repair Ticket
+```bash
+curl -X POST http://localhost:8000/api/repairs \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Fix login bug", "description": "...", "pipeline": "ai_agent"}'
+```
+
+### Dashboard UI Features
+- **Draggable/Resizable Overview Grid** — 6 tiles (costs, quality, tools, schedules, budget, persona) powered by react-grid-layout. Drag headers to rearrange, resize by dragging edges. Layout persisted per-user in Redis.
+- **Tool Wizard** — AI-guided dialog in Tools tab: interview → generate → review → save.
+- **Selective Org Deletion** — Preview dialog shows agents, tasks, activity count. Check items to retain before confirming delete.
+- **Manual Tickets** — "New Ticket" button in Repairs tab for opening repair tickets manually.
+- **Interactions Drill-Down** — Click the Interactions tile on Overview → drawer with audit-log rows, filters (all/inbound/outbound/errors), and trace drill-down.
+- **Duplicate Detection** — When setting up org projects, existing agents/tools/skills with ≥ 85% name similarity are reused.
+
 ## Roadmap
 
-### Phase 1 (Current)
+### Completed
 - ✅ Basic agent registry
 - ✅ Task management
 - ✅ Web dashboard
 - ✅ Cost control
 - ✅ Governance layer
+- ✅ Tool Wizard + Manual Tickets
+- ✅ Selective Org Deletion + Duplicate Detection
+- ✅ Draggable/Resizable Overview Grid
+- ✅ Interactions Drill-Down + Activity API
 
-### Phase 2 (Planned)
-- 🔄 Agent skill learning
-- 🔄 Advanced scheduling
-- 🔄 Multi-company support
-- 🔄 Mobile app
-
-### Phase 3 (Future)
+### Future
+- ⏳ Agent skill learning
+- ⏳ Mobile app
 - ⏳ AI-powered agent optimization
-- ⏳ Marketplace for agent templates
 - ⏳ Advanced analytics
-- ⏳ Voice interface
 
 ## Contributing
 

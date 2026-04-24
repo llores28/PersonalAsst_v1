@@ -2,10 +2,14 @@
 
 import asyncio
 import logging
+import base64
 
-from aiogram import Router
+import json
+import uuid
+
+from aiogram import Router, F
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from src.settings import settings
 from src.bot.handler_utils import (
@@ -23,19 +27,58 @@ router = Router()
 _user_queues: dict[int, asyncio.Queue] = {}
 _user_workers: dict[int, asyncio.Task] = {}
 
+QUEUE_IDLE_TIMEOUT_S = 1800  # 30 minutes — worker self-terminates after this idle period
+
+# Per-user rate limiting: max messages per window
+_USER_RATE_LIMIT = 10       # max messages
+_USER_RATE_WINDOW_S = 60    # per this many seconds
+_user_message_times: dict[int, list[float]] = {}
+
+
+def _is_user_rate_limited(user_id: int) -> bool:
+    """Return True if user has exceeded the per-user message rate limit."""
+    import time
+    now = time.monotonic()
+    window_start = now - _USER_RATE_WINDOW_S
+
+    timestamps = _user_message_times.get(user_id, [])
+    # Prune old timestamps
+    timestamps = [t for t in timestamps if t > window_start]
+    _user_message_times[user_id] = timestamps
+
+    if len(timestamps) >= _USER_RATE_LIMIT:
+        return True
+
+    timestamps.append(now)
+    return False
+
 
 async def _get_user_queue(user_id: int) -> asyncio.Queue:
-    if user_id not in _user_queues:
+    existing_worker = _user_workers.get(user_id)
+    if user_id not in _user_queues or (existing_worker is not None and existing_worker.done()):
         _user_queues[user_id] = asyncio.Queue()
         _user_workers[user_id] = asyncio.create_task(_process_user_queue(user_id))
     return _user_queues[user_id]
 
 
 async def _process_user_queue(user_id: int) -> None:
-    """Process messages sequentially per user (AD-6)."""
+    """Process messages sequentially per user (AD-6).
+
+    Exits after QUEUE_IDLE_TIMEOUT_S of inactivity and removes itself from
+    the tracking dicts to prevent unbounded memory growth.
+    """
     queue = _user_queues[user_id]
     while True:
-        message, handler_coro = await queue.get()
+        try:
+            message, handler_coro = await asyncio.wait_for(
+                queue.get(), timeout=QUEUE_IDLE_TIMEOUT_S
+            )
+        except asyncio.TimeoutError:
+            # Idle timeout — clean up and exit
+            _user_queues.pop(user_id, None)
+            _user_workers.pop(user_id, None)
+            logger.debug("User queue for %d idle for %ds — cleaned up", user_id, QUEUE_IDLE_TIMEOUT_S)
+            return
         try:
             await asyncio.wait_for(handler_coro, timeout=settings.agent_timeout_seconds)
         except asyncio.TimeoutError:
@@ -131,6 +174,7 @@ async def cmd_help(message: Message) -> None:
         "/schedules — List scheduled tasks\n"
         "/stats — View usage statistics\n"
         "/cancel <job_id> — Cancel a scheduled task\n"
+        "/neworg <goal> — AI-powered organization creation\n"
         "/security — Configure security PIN/questions for repair approvals\n\n"
         "Scheduling:\n"
         "• \"Remind me every Monday at 9am to review goals\"\n"
@@ -419,17 +463,225 @@ async def cmd_stats(message: Message) -> None:
     filled = int(cost_pct / 100 * bar_len)
     cost_bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
 
-    await message.answer(
-        f"**Dashboard**\n\n"
-        f"**Cost today:** ${today_cost:.4f} / ${settings.daily_cost_cap_usd:.2f}\n"
-        f"[{cost_bar}] {cost_pct:.0f}%\n\n"
-        f"**Requests today:** {today_requests}\n"
-        f"**Total interactions:** {total_interactions}\n"
-        f"**Active tools:** {active_tools}\n"
-        f"**Active schedules:** {active_schedules}\n"
-        f"**Stored memories:** {memory_count}\n",
-        parse_mode="Markdown",
+    # Build message lines
+    lines = [
+        "**Dashboard**\n",
+        f"**Cost today:** ${today_cost:.4f} / ${settings.daily_cost_cap_usd:.2f}",
+        f"[{cost_bar}] {cost_pct:.0f}%\n",
+    ]
+
+    # Add per-provider cost breakdown if multi-LLM is enabled
+    if getattr(settings, 'multi_llm_enabled', False):
+        from src.models.cost_tracker import get_cost_breakdown
+        
+        breakdown = await get_cost_breakdown(user.id)
+        if breakdown:
+            lines.append("**By provider:**")
+            for provider, cost in sorted(breakdown.items(), key=lambda x: x[1], reverse=True):
+                cap_setting = f"{provider}_daily_cost_cap_usd"
+                cap = getattr(settings, cap_setting, settings.daily_cost_cap_usd)
+                pct = (cost / cap * 100) if cap else 0
+                status = "🟢" if pct < 80 else "🟡" if pct < 100 else "🔴"
+                lines.append(f"  {status} {provider}: ${cost:.4f} / ${cap:.2f}")
+            lines.append("")  # Empty line after breakdown
+
+    lines.extend([
+        f"**Requests today:** {today_requests}",
+        f"**Total interactions:** {total_interactions}",
+        f"**Active tools:** {active_tools}",
+        f"**Active schedules:** {active_schedules}",
+        f"**Stored memories:** {memory_count}",
+    ])
+
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(Command("model"))
+async def cmd_model(message: Message) -> None:
+    """Handle /model — switch LLM provider and model.
+
+    Subcommands:
+        /model                              — Show current model and available providers
+        /model list                         — List available providers
+        /model <provider>                   — Switch to provider's default model
+        /model <provider>:<model>           — Switch to specific model
+        /model reset                        — Reset to system default
+
+    Examples:
+        /model anthropic                    — Use Claude default
+        /model openrouter:anthropic/claude-3-opus  — Use specific OpenRouter model
+        /model openai:gpt-5.4-mini          — Use specific OpenAI model
+    """
+    if not await is_allowed(message.from_user.id):
+        return
+
+    # Check if multi-LLM is enabled
+    if not getattr(settings, 'multi_llm_enabled', False):
+        await message.answer(
+            "🔒 *Multi-LLM support is disabled.*\n\n"
+            "To enable provider switching, set `MULTI_LLM_ENABLED=true` in your `.env` file and restart.",
+            parse_mode="Markdown",
+        )
+        return
+
+    from src.models.provider_resolution import ProviderResolver
+    from src.models.user_preferences import (
+        set_user_model,
+        clear_user_model,
+        format_provider_list,
+        list_available_models_for_user,
+        get_user_model_display,
     )
+
+    text = (message.text or "").strip()
+    parts = text.split(maxsplit=2)
+
+    # No arguments - show current and available
+    if len(parts) == 1:
+        current_display = await get_user_model_display(message.from_user.id)
+        providers = await list_available_models_for_user(message.from_user.id)
+
+        lines = [
+            f"🤖 *Current Model:* `{current_display}`\n",
+            format_provider_list(providers),
+        ]
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+        return
+
+    subcommand = parts[1].lower()
+
+    # /model list - show available providers
+    if subcommand == "list":
+        providers = await list_available_models_for_user(message.from_user.id)
+        await message.answer(
+            format_provider_list(providers),
+            parse_mode="Markdown",
+        )
+        return
+
+    # /model status - show detailed provider status
+    if subcommand == "status":
+        from src.models.cost_tracker import check_cost_cap
+        
+        resolver = ProviderResolver()
+        providers = resolver.list_available(configured_only=False)
+        
+        lines = ["🔌 *Provider Status*\n"]
+        
+        for provider in providers:
+            # Check configuration
+            is_configured = provider.is_configured
+            status_icon = "✅" if is_configured else "❌"
+            
+            # Check cost cap if configured
+            cap_info = ""
+            if is_configured and getattr(settings, 'multi_llm_enabled', False):
+                try:
+                    is_capped, current, limit = await check_cost_cap(
+                        message.from_user.id, provider.name
+                    )
+                    if is_capped:
+                        cap_info = " 🔴 *CAPPED*"
+                    elif current > 0:
+                        cap_info = f" (${current:.2f}/${limit:.2f})"
+                except Exception:
+                    pass
+            
+            lines.append(
+                f"{status_icon} *{provider.name}* — {provider.api_mode}{cap_info}\n"
+                f"   Default: `{provider.default_model}`\n"
+                f"   Tools: {'✅' if provider.supports_tools else '❌'} "
+                f"Streaming: {'✅' if provider.supports_streaming else '❌'}\n"
+            )
+        
+        # Show current preference
+        current = await get_user_model_display(message.from_user.id)
+        lines.append(f"\n🤖 *Your current:* `{current}`")
+        
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+        return
+
+    # /model reset - clear user preference
+    if subcommand == "reset":
+        success = await clear_user_model(message.from_user.id)
+        if success:
+            default = settings.default_llm_provider
+            await message.answer(
+                f"✅ Reset to system default: `{default}`",
+                parse_mode="Markdown",
+            )
+        else:
+            await message.answer(
+                "❌ Failed to reset. Try again or check logs.",
+                parse_mode="Markdown",
+            )
+        return
+
+    # Parse provider:model format
+    provider_input = subcommand
+    model_id = None
+
+    if ":" in provider_input:
+        provider_name, model_id = provider_input.split(":", 1)
+    else:
+        provider_name = provider_input
+
+    # Validate provider exists and is configured
+    resolver = ProviderResolver()
+    try:
+        config = resolver.resolve(provider_name)
+    except ValueError as e:
+        available = resolver.list_provider_names(configured_only=True)
+        await message.answer(
+            f"❌ *Error:* `{e}`\n\n"
+            f"*Available providers:* {', '.join(f'`{p}`' for p in available)}",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Check cost cap before switching
+    from src.models.cost_tracker import check_cost_cap, should_warn_about_cap
+    
+    is_capped, current_cost, cap_limit = await check_cost_cap(
+        message.from_user.id, provider_name
+    )
+    
+    if is_capped:
+        await message.answer(
+            f"🔴 *Cannot switch to {provider_name}*\n\n"
+            f"Daily cost cap reached: `${current_cost:.2f} / ${cap_limit:.2f}`\n\n"
+            f"Try another provider or wait until tomorrow.",
+            parse_mode="Markdown",
+        )
+        return
+    
+    # Warn if approaching cap (80%)
+    should_warn, _, _ = await should_warn_about_cap(message.from_user.id, provider_name)
+    if should_warn:
+        await message.answer(
+            f"⚠️ *Warning:* {provider_name} is at {current_cost/cap_limit*100:.0f}% of daily cap.\n"
+            f"Cost: `${current_cost:.2f} / ${cap_limit:.2f}`\n\n"
+            f"Switching anyway...",
+            parse_mode="Markdown",
+        )
+
+    # Save the preference
+    success = await set_user_model(message.from_user.id, provider_name, model_id)
+
+    if success:
+        model_display = model_id or config.default_model
+        await message.answer(
+            f"✅ *Model switched successfully*\n\n"
+            f"Provider: `{provider_name}`\n"
+            f"Model: `{model_display}`\n\n"
+            f"Your next message will use this model.",
+            parse_mode="Markdown",
+        )
+    else:
+        await message.answer(
+            "❌ Failed to save model preference. Please try again.",
+            parse_mode="Markdown",
+        )
 
 
 @router.message(Command("tools"))
@@ -787,6 +1039,11 @@ async def cmd_security(message: Message) -> None:
 
     subcommand = args[1].lower()
 
+    # Shorthand: /security 1234 → treat as /security pin 1234
+    if subcommand.isdigit() and len(subcommand) == 4:
+        args = [args[0], "pin", subcommand]
+        subcommand = "pin"
+
     from sqlalchemy import select
     from src.db.session import async_session
     from src.db.models import User, OwnerSecurityConfig
@@ -865,7 +1122,224 @@ async def cmd_security(message: Message) -> None:
             await message.answer("\n".join(lines), parse_mode="Markdown")
 
         else:
-            await message.answer("Unknown subcommand. Use `pin`, `question`, or `status`.", parse_mode="Markdown")
+            await message.answer(
+                "Unknown subcommand.\n\n"
+                "**Usage:**\n"
+                "`/security pin 1234` — Set your 4-digit PIN\n"
+                "`/security 1234` — Shorthand for setting PIN\n"
+                "`/security question What is your pet? | Fluffy` — Add a Q&A\n"
+                "`/security status` — View current config",
+                parse_mode="Markdown",
+            )
+
+
+@router.message(Command("voice"))
+async def cmd_voice(message: Message) -> None:
+    """Handle /voice — view or set the TTS voice used for audio replies."""
+    if not await is_allowed(message.from_user.id):
+        return
+
+    from src.bot.voice import TTS_VOICES, get_user_tts_voice, set_user_tts_voice
+
+    args = message.text.split(maxsplit=1) if message.text else []
+
+    if len(args) < 2:
+        current = await get_user_tts_voice(message.from_user.id)
+        voices_list = "  ".join(f"`{v}`" for v in TTS_VOICES)
+        await message.answer(
+            f"🎙 Current TTS voice: *{current}*\n\n"
+            f"Available voices: {voices_list}\n\n"
+            f"Change with: `/voice <name>` — e.g. `/voice nova`",
+            parse_mode="Markdown",
+        )
+        return
+
+    requested = args[1].strip().lower()
+    if requested not in TTS_VOICES:
+        voices_list = ", ".join(f"`{v}`" for v in TTS_VOICES)
+        await message.answer(
+            f"Unknown voice `{requested}`. Choose from: {voices_list}",
+            parse_mode="Markdown",
+        )
+        return
+
+    ok = await set_user_tts_voice(message.from_user.id, requested)
+    if ok:
+        await message.answer(
+            f"✅ TTS voice set to *{requested}*. Your next audio reply will use this voice.",
+            parse_mode="Markdown",
+        )
+    else:
+        await message.answer("Failed to save voice preference. Please try again.")
+
+
+# ── Repair Ticket Commands ───────────────────────────────────────────────
+
+@router.message(Command("tickets"))
+async def cmd_tickets(message: Message) -> None:
+    """Handle /tickets — list all open repair tickets."""
+    if not await is_allowed(message.from_user.id):
+        return
+
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import RepairTicket, User
+
+    try:
+        async with async_session() as session:
+            user_result = await session.execute(
+                select(User).where(User.telegram_id == message.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
+            if user is None:
+                await message.answer("No user record found.")
+                return
+
+            result = await session.execute(
+                select(RepairTicket)
+                .where(
+                    RepairTicket.user_id == user.id,
+                    RepairTicket.status.notin_(["deployed", "closed"]),
+                )
+                .order_by(RepairTicket.created_at.desc())
+                .limit(20)
+            )
+            tickets = result.scalars().all()
+
+        if not tickets:
+            await message.answer(
+                "✅ No open repair tickets — everything looks clean!",
+                parse_mode="Markdown",
+            )
+            return
+
+        lines = ["🎫 *Open Repair Tickets*\n"]
+        for t in tickets:
+            status_emoji = {
+                "open": "🔴",
+                "debug_analysis_ready": "🟡",
+                "plan_ready": "🟠",
+                "verifying": "🔵",
+                "verification_failed": "❌",
+                "ready_for_deploy": "✅",
+            }.get(t.status, "⚪")
+            lines.append(
+                f"{status_emoji} *#{t.id}* — {t.title[:60]}\n"
+                f"   Status: `{t.status}` | Priority: `{t.priority}`\n"
+                f"   Created: {t.created_at.strftime('%Y-%m-%d %H:%M') if t.created_at else 'unknown'}"
+            )
+
+        lines.append("\nUse `/ticket approve <id>` to deploy a ready fix.")
+        lines.append("Use `/ticket close <id>` to dismiss a ticket.")
+        await message.answer("\n\n".join(lines), parse_mode="Markdown")
+
+    except Exception as exc:
+        logger.exception("cmd_tickets error: %s", exc)
+        await message.answer("Failed to load tickets. Please try again.")
+
+
+@router.message(Command("ticket"))
+async def cmd_ticket(message: Message) -> None:
+    """Handle /ticket approve <id> and /ticket close <id>."""
+    if not await is_allowed(message.from_user.id):
+        return
+
+    if message.from_user.id != settings.owner_telegram_id:
+        await message.answer("Only the owner can manage repair tickets.")
+        return
+
+    args = (message.text or "").split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer(
+            "Usage:\n"
+            "  `/ticket approve <id>` — deploy a verified fix\n"
+            "  `/ticket close <id>` — dismiss a ticket without deploying",
+            parse_mode="Markdown",
+        )
+        return
+
+    action = args[1].strip().lower()
+    try:
+        ticket_id = int(args[2].strip())
+    except ValueError:
+        await message.answer("Invalid ticket ID. Use a number, e.g. `/ticket approve 5`", parse_mode="Markdown")
+        return
+
+    if action == "approve":
+        await message.answer(f"🔐 Approving ticket #{ticket_id}... verifying security.")
+        from src.repair.engine import approve_ticket_deploy
+        result = await approve_ticket_deploy(ticket_id, message.from_user.id)
+        await message.answer(result, parse_mode="Markdown")
+
+    elif action == "close":
+        from sqlalchemy import select
+        from src.db.session import async_session
+        from src.db.models import RepairTicket
+        try:
+            async with async_session() as session:
+                ticket = await session.get(RepairTicket, ticket_id)
+                if ticket is None:
+                    await message.answer(f"Ticket #{ticket_id} not found.")
+                    return
+                ticket.status = "closed"
+                await session.commit()
+            await message.answer(f"✅ Ticket #{ticket_id} closed.")
+        except Exception as exc:
+            logger.exception("Failed to close ticket %s: %s", ticket_id, exc)
+            await message.answer("Failed to close ticket. Please try again.")
+    else:
+        await message.answer(
+            "Unknown action. Use `approve` or `close`.",
+            parse_mode="Markdown",
+        )
+
+
+@router.callback_query(F.data.startswith("repair_approve:"))
+async def cb_repair_approve(callback: CallbackQuery) -> None:
+    """Inline button: owner taps '✅ Apply fix now'."""
+    if not await is_allowed(callback.from_user.id):
+        await callback.answer("Not authorized.", show_alert=True)
+        return
+
+    if callback.from_user.id != settings.owner_telegram_id:
+        await callback.answer("Only the owner can approve repairs.", show_alert=True)
+        return
+
+    try:
+        ticket_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Invalid ticket ID.", show_alert=True)
+        return
+
+    await callback.answer("Applying fix…", show_alert=False)
+    await callback.message.edit_text(
+        f"🔧 Applying fix for ticket #{ticket_id}…",
+        parse_mode="Markdown",
+    )
+
+    from src.repair.engine import approve_ticket_deploy
+    result = await approve_ticket_deploy(ticket_id, callback.from_user.id)
+    await callback.message.answer(result, parse_mode="Markdown")
+
+
+@router.callback_query(F.data.startswith("repair_skip:"))
+async def cb_repair_skip(callback: CallbackQuery) -> None:
+    """Inline button: owner taps '❌ Skip for now'."""
+    if not await is_allowed(callback.from_user.id):
+        await callback.answer("Not authorized.", show_alert=True)
+        return
+
+    try:
+        ticket_id = int(callback.data.split(":")[1])
+    except (IndexError, ValueError):
+        await callback.answer("Invalid ticket ID.", show_alert=True)
+        return
+
+    await callback.answer("Skipped.", show_alert=False)
+    await callback.message.edit_text(
+        f"⏸ Fix for ticket #{ticket_id} skipped. Use `/ticket approve {ticket_id}` whenever you're ready.",
+        parse_mode="Markdown",
+    )
 
 
 @router.message(Command("cancel"))
@@ -993,7 +1467,7 @@ async def cmd_skills(message: Message) -> None:
             return
 
         from pathlib import Path
-        skill_path = Path(f"user_skills/{arg}")
+        skill_path = Path(f"src/user_skills/{arg}")
 
         if not skill_path.exists():
             await message.answer(f"Skill `{arg}` not found.", parse_mode="Markdown")
@@ -1022,7 +1496,7 @@ async def cmd_skills(message: Message) -> None:
         from src.skills.loader import SkillLoader
         from pathlib import Path
 
-        skill_path = Path(f"user_skills/{arg}")
+        skill_path = Path(f"src/user_skills/{arg}")
         if not skill_path.exists():
             await message.answer(f"Skill `{arg}` not found.", parse_mode="Markdown")
             return
@@ -1065,11 +1539,11 @@ async def cmd_skills(message: Message) -> None:
     from src.skills.loader import SkillLoader
     from pathlib import Path
 
-    skills_dir = Path("user_skills")
+    skills_dir = Path("src/user_skills")
     if not skills_dir.exists():
         await message.answer(
             "No user skills directory found.\n"
-            "Create skills in the `user_skills/` folder.",
+            "Create skills in the `src/user_skills/` folder.",
             parse_mode="Markdown"
         )
         return
@@ -1083,7 +1557,7 @@ async def cmd_skills(message: Message) -> None:
             "No user-created skills found.\n\n"
             "**Create a skill:**\n"
             "• `/skills create` - AI-guided creation\n"
-            "• Or add SKILL.md files to `user_skills/` folder",
+            "• Or add SKILL.md files to `src/user_skills/` folder",
             parse_mode="Markdown"
         )
         return
@@ -1132,12 +1606,11 @@ async def cmd_orgs(message: Message) -> None:
             return
 
         if subcommand == "create":
-            await set_session_field(message.from_user.id, "org_creation_active", "true")
-            await set_session_field(message.from_user.id, "org_creation_step", "name")
             await message.answer(
-                "🏢 **Organization Creation Wizard**\n\n"
-                "Let's create a new organization.\n\n"
-                "Step 1 of 3: What should the organization be called?",
+                "🧠 **AI-Powered Organization Wizard**\n\n"
+                "Use `/neworg <your goal>` to let Atlas AI design your team, tasks, and tools automatically.\n\n"
+                "Example:\n"
+                "`/neworg Find a new job as a senior software engineer in 90 days`",
                 parse_mode="Markdown",
             )
             return
@@ -1243,13 +1716,242 @@ async def cmd_orgs(message: Message) -> None:
     lines.extend([
         "",
         "**Commands:**",
-        "• `/orgs create` - New organization",
+        "• `/neworg <goal>` - AI-powered new organization",
         "• `/orgs info <id>` - Details",
         "• `/orgs pause <id>` - Deactivate",
         "• `/orgs resume <id>` - Reactivate",
         "• `/orgs delete <id>` - Delete",
     ])
     await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /neworg AI-powered organization creation ──────────────────────────
+
+async def _call_org_setup(goal: str, org_name: str, plan: dict, telegram_id: int) -> dict:
+    """Call /api/orgs/setup with a pre-built plan from Telegram context."""
+    import httpx
+    api_base = "http://localhost:8100"
+    async with httpx.AsyncClient(timeout=60) as client:
+        resp = await client.post(
+            f"{api_base}/api/orgs/setup",
+            json={"goal": goal, "org_name": org_name, "plan": plan},
+            headers={"X-Telegram-Id": str(telegram_id)},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def _call_org_validate(org_id: int, telegram_id: int) -> dict:
+    """Call /api/orgs/{id}/validate to get cohesion report."""
+    import httpx
+    api_base = "http://localhost:8100"
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            f"{api_base}/api/orgs/{org_id}/validate",
+            headers={"X-Telegram-Id": str(telegram_id)},
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _format_plan_summary(plan: dict) -> str:
+    """Format the AI plan as a readable Telegram message."""
+    lines = [
+        f"🏢 *{plan.get('org_name', 'New Org')}*",
+        f"_{plan.get('org_goal', '')}_",
+        "",
+    ]
+    agents = plan.get("agents") or []
+    if agents:
+        lines.append(f"👥 *Agents ({len(agents)}):*")
+        for a in agents:
+            skills = ", ".join(a.get("skills") or [])
+            tools = ", ".join((a.get("allowed_tools") or [])[:3])
+            tier = a.get("model_tier", "general")
+            lines.append(f"  • *{a.get('name')}* [{tier}]")
+            if skills:
+                lines.append(f"    Skills: {skills}")
+            if tools:
+                lines.append(f"    Tools: {tools}")
+        lines.append("")
+
+    tasks = plan.get("tasks") or []
+    if tasks:
+        lines.append(f"📋 *Tasks ({len(tasks)}):*")
+        for t in tasks[:8]:
+            p = t.get("priority", "medium")
+            icon = {"high": "🔴", "medium": "🟡", "low": "⚪"}.get(p, "🟡")
+            lines.append(f"  {icon} {t.get('title')} → _{t.get('agent_name')}_")
+        if len(tasks) > 8:
+            lines.append(f"  ...and {len(tasks) - 8} more")
+        lines.append("")
+
+    budget = plan.get("budget_cap_usd")
+    if budget:
+        lines.append(f"💰 Budget suggestion: ${budget}/month")
+        lines.append("")
+
+    lines.append("Confirm creation?")
+    return "\n".join(lines)
+
+
+@router.message(Command("neworg"))
+async def cmd_neworg(message: Message) -> None:
+    """Handle /neworg <goal> — AI-powered organization creation with live plan."""
+    if not await is_allowed(message.from_user.id):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2 or not parts[1].strip():
+        await message.answer(
+            "🧠 *AI Organization Wizard*\n\n"
+            "Usage: `/neworg <goal>`\n\n"
+            "Example:\n"
+            "`/neworg Land a senior SWE role in 90 days`\n"
+            "`/neworg Build a content marketing pipeline for my startup`",
+            parse_mode="Markdown",
+        )
+        return
+
+    goal = parts[1].strip()
+    thinking_msg = await message.answer("🧠 Planning your organization… (this takes ~10 seconds)", parse_mode="Markdown")
+
+    try:
+        from src.orchestration.api import _build_org_plan
+        plan = await _build_org_plan(goal)
+    except Exception as exc:
+        await thinking_msg.edit_text(f"❌ Planning failed: {exc}")
+        return
+
+    org_name = plan.get("org_name") or goal[:40]
+
+    # Store plan in Redis keyed by a short UUID
+    plan_key = str(uuid.uuid4())[:8]
+    try:
+        from src.memory.conversation import set_session_field
+        await set_session_field(
+            message.from_user.id,
+            f"neworg_plan_{plan_key}",
+            json.dumps({"goal": goal, "org_name": org_name, "plan": plan}),
+        )
+    except Exception as exc:
+        logger.warning("Failed to store neworg plan in Redis: %s", exc)
+        await thinking_msg.edit_text("❌ Could not store plan. Please try again.")
+        return
+
+    summary = _format_plan_summary(plan)
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Confirm", callback_data=f"neworg_confirm:{plan_key}:{message.from_user.id}"),
+            InlineKeyboardButton(text="❌ Cancel", callback_data=f"neworg_cancel:{plan_key}:{message.from_user.id}"),
+        ]]
+    )
+
+    await thinking_msg.edit_text(summary, parse_mode="Markdown", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("neworg_confirm:"))
+async def cb_neworg_confirm(callback: CallbackQuery) -> None:
+    """Handle Confirm button for /neworg — create org atomically."""
+    _, plan_key, orig_user_id = callback.data.split(":", 2)
+    telegram_id = callback.from_user.id
+
+    if str(telegram_id) != orig_user_id:
+        await callback.answer("This confirmation is not for you.", show_alert=True)
+        return
+
+    await callback.answer("Creating your organization…")
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    try:
+        from src.memory.conversation import get_session_field, delete_session_field
+        raw = await get_session_field(telegram_id, f"neworg_plan_{plan_key}")
+        if not raw:
+            await callback.message.answer("❌ Plan expired. Run `/neworg` again.", parse_mode="Markdown")
+            return
+        data = json.loads(raw)
+    except Exception as exc:
+        await callback.message.answer(f"❌ Could not retrieve plan: {exc}")
+        return
+
+    creating_msg = await callback.message.answer("⚙️ Creating organization…")
+    try:
+        result = await _call_org_setup(
+            goal=data["goal"],
+            org_name=data["org_name"],
+            plan=data["plan"],
+            telegram_id=telegram_id,
+        )
+        org_id = result["org_id"]
+        org_name = result["org_name"]
+        agent_count = len(result.get("agents", []))
+        task_count = len(result.get("tasks", []))
+    except Exception as exc:
+        await creating_msg.edit_text(f"❌ Creation failed: {exc}")
+        return
+
+    # Run cohesion validation
+    cohesion_text = ""
+    try:
+        val = await _call_org_validate(org_id, telegram_id)
+        score = val.get("score", 0)
+        warnings = val.get("warnings") or []
+        errors = val.get("errors") or []
+        score_icon = "✅" if score >= 80 else "⚠️" if score >= 60 else "❌"
+        cohesion_text = (
+            f"\n\n{score_icon} *Cohesion Score: {score}/100*"
+        )
+        if errors:
+            cohesion_text += "\n" + "\n".join(f"  ❌ {e}" for e in errors[:3])
+        if warnings:
+            cohesion_text += "\n" + "\n".join(f"  ⚠️ {w}" for w in warnings[:5])
+        if score >= 80 and not warnings:
+            cohesion_text += "\n  All agents, skills & tools validated."
+    except Exception:
+        pass
+
+    # Clean up Redis key
+    try:
+        from src.memory.conversation import delete_session_field
+        await delete_session_field(telegram_id, f"neworg_plan_{plan_key}")
+    except Exception:
+        pass
+
+    await creating_msg.edit_text(
+        f"✅ *Organization created!*\n\n"
+        f"*Name:* {org_name}\n"
+        f"*ID:* `{org_id}`\n"
+        f"*Agents:* {agent_count}\n"
+        f"*Tasks:* {task_count}"
+        f"{cohesion_text}",
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("neworg_cancel:"))
+async def cb_neworg_cancel(callback: CallbackQuery) -> None:
+    """Handle Cancel button for /neworg."""
+    _, plan_key, orig_user_id = callback.data.split(":", 2)
+    telegram_id = callback.from_user.id
+
+    if str(telegram_id) != orig_user_id:
+        await callback.answer("This is not your confirmation.", show_alert=True)
+        return
+
+    await callback.answer("Cancelled.")
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    try:
+        from src.memory.conversation import delete_session_field
+        await delete_session_field(telegram_id, f"neworg_plan_{plan_key}")
+    except Exception:
+        pass
+
+    await callback.message.answer(
+        "❌ Organization creation cancelled.\n"
+        "Run `/neworg <goal>` again whenever you're ready.",
+        parse_mode="Markdown",
+    )
 
 
 @router.message()
@@ -1262,17 +1964,66 @@ async def handle_message(message: Message) -> None:
         await message.answer("Daily usage limit reached. Resets at midnight.")
         return
 
+    if _is_user_rate_limited(message.from_user.id):
+        await message.answer("You're sending messages too fast. Please wait a moment.")
+        return
+
     # Phase 6: Voice message support
     if message.voice:
-        await message.answer(" Transcribing voice message...")
+        try:
+            await message.answer_chat_action(action="typing")
+        except Exception:
+            pass
         from src.bot.voice import transcribe_voice
         text = await transcribe_voice(message.voice.file_id, message.bot)
         if text.startswith("("):
             await message.answer(text)
             return
-        # Process transcribed text as a regular message
+        await message.answer(f'🎤 _"{text}"_', parse_mode="Markdown")
+        try:
+            from src.memory.conversation import set_session_field
+            await set_session_field(message.from_user.id, "wants_audio_reply", "true")
+        except Exception:
+            pass
         queue = await _get_user_queue(message.from_user.id)
         await queue.put((message, _run_orchestrator_with_text(message, text)))
+        return
+
+    if message.photo:
+        try:
+            from src.memory.conversation import set_session_field
+
+            photo = message.photo[-1]
+            file_info = await message.bot.get_file(photo.file_id)
+            file_url = f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file_info.file_path}"
+
+            import httpx
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(file_url, timeout=30)
+                response.raise_for_status()
+                photo_bytes = response.content
+
+            suffix = file_info.file_path.rsplit(".", 1)[-1].lower() if "." in file_info.file_path else "jpg"
+            mime_type = "image/png" if suffix == "png" else "image/jpeg"
+            await set_session_field(
+                message.from_user.id,
+                "latest_uploaded_image",
+                json.dumps(
+                    {
+                        "mime_type": mime_type,
+                        "data_base64": base64.b64encode(photo_bytes).decode("utf-8"),
+                    }
+                ),
+            )
+        except Exception as exc:
+            logger.exception("Photo upload handling failed: %s", exc)
+            await message.answer("I couldn't read that photo. Please try sending it again.")
+            return
+
+        prompt = message.caption or "Please describe this image in detail."
+        queue = await _get_user_queue(message.from_user.id)
+        await queue.put((message, _run_orchestrator_with_text(message, prompt)))
         return
 
     if not message.text:
@@ -1415,6 +2166,26 @@ async def handle_message(message: Message) -> None:
         if embedded_command.lower().startswith("/connect"):
             await _handle_connect_request(message, embedded_command)
             return
+
+    # Detect explicit audio/voice response requests and set a session flag
+    try:
+        from src.memory.conversation import set_session_field, delete_session_field
+        _lowered_text = message.text.lower()
+        _audio_cues = (
+            "reply with audio", "respond with audio", "answer with audio",
+            "reply in audio", "respond in audio",
+            "reply with voice", "respond with voice", "answer with voice",
+            "reply in voice", "respond in voice",
+            "send audio", "send voice", "voice reply", "audio reply",
+            "speak your answer", "speak your response", "read it out",
+            "read that out", "say it", "say that",
+        )
+        if any(cue in _lowered_text for cue in _audio_cues):
+            await set_session_field(message.from_user.id, "wants_audio_reply", "true")
+        else:
+            await delete_session_field(message.from_user.id, "wants_audio_reply")
+    except Exception:
+        pass
 
     queue = await _get_user_queue(message.from_user.id)
     await queue.put((message, _run_orchestrator(message)))

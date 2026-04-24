@@ -8,10 +8,13 @@ import logging
 from datetime import datetime
 from typing import Optional
 
+from decimal import Decimal
+
 from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Numeric,
     String,
     Text,
 )
@@ -38,6 +41,9 @@ class Organization(Base):
     status: Mapped[str] = mapped_column(String(20), default="active")
     owner_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     config: Mapped[Optional[dict]] = mapped_column(JSONB)
+    budget_cap_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 2), nullable=False, default=Decimal("0.00")
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -82,6 +88,7 @@ class OrgTask(Base):
     priority: Mapped[str] = mapped_column(String(20), default="medium")
     status: Mapped[str] = mapped_column(String(20), default="pending")
     result: Mapped[Optional[dict]] = mapped_column(JSONB)
+    goal_ancestry: Mapped[Optional[list]] = mapped_column(JSONB)
     source: Mapped[str] = mapped_column(String(20), default="dashboard")
     due_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
@@ -109,6 +116,46 @@ class OrgActivity(Base):
     details: Mapped[Optional[str]] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(20), default="system")
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class OrgApprovalGate(Base):
+    """Phase 2: A pending human-approval request for an org agent action."""
+    __tablename__ = "approval_gates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("org_agents.id", ondelete="SET NULL")
+    )
+    action: Mapped[str] = mapped_column(String(200), nullable=False)
+    context: Mapped[Optional[dict]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    decision_note: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class OrgSpend(Base):
+    """Phase 4: Per-org cost tracking entry."""
+    __tablename__ = "org_spend"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("org_agents.id", ondelete="SET NULL")
+    )
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(12, 6), nullable=False)
+    model_used: Mapped[Optional[str]] = mapped_column(String(100))
+    description: Mapped[Optional[str]] = mapped_column(String(500))
+    recorded_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 

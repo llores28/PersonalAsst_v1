@@ -191,8 +191,9 @@
       <div class="hero-stat"><div class="num">75+</div><div class="label">Tools</div></div>
       <div class="hero-stat"><div class="num">10</div><div class="label">Skills</div></div>
       <div class="hero-stat"><div class="num">7</div><div class="label">Docker Services</div></div>
-      <div class="hero-stat"><div class="num">Apr 12, 2026</div><div class="label">Last Update</div></div>
+      <div class="hero-stat"><div class="num">Apr 13, 2026</div><div class="label">Last Update</div></div>
       <div class="hero-stat"><div class="num">M1–M4 ✅</div><div class="label">Agentic Upgrade</div></div>
+      <div class="hero-stat"><div class="num">9 tabs</div><div class="label">Dashboard UI</div></div>
     </div>
   </div>
 </header>
@@ -214,6 +215,8 @@
       <a href="#bugs"><span class="num">10</span> Bug Fix Timeline</a>
       <a href="#stats"><span class="num">11</span> Project Statistics</a>
       <a href="#agentic"><span class="num">12</span> Agentic Upgrade M1–M4</a>
+      <a href="#src-consolidation"><span class="num">13</span> src/ Consolidation</a>
+      <a href="#agents-tab"><span class="num">14</span> Agents Tab</a>
     </div>
   </div>
 
@@ -805,9 +808,9 @@ graph LR
   <table>
     <thead><tr><th>Service</th><th>Image</th><th>Port</th><th>Data Volume</th><th>Purpose</th></tr></thead>
     <tbody>
-      <tr><td>assistant</td><td>Custom (Python 3.12)</td><td>—</td><td>src/tools/plugins/, user_skills/</td><td>Main app: bot, agents, scheduler</td></tr>
-      <tr><td>orchestration-api</td><td>Custom (Python 3.12)</td><td>8000</td><td>—</td><td>FastAPI Dashboard API (traces, repairs, jobs)</td></tr>
-      <tr><td>orchestration-ui</td><td>nginx + React build</td><td>3001</td><td>—</td><td>Dashboard UI (Activity, Repairs, Jobs tabs)</td></tr>
+      <tr><td>assistant</td><td>Custom (Python 3.12)</td><td>—</td><td>src/tools/plugins/, src/user_skills/</td><td>Main app: bot, agents, scheduler</td></tr>
+      <tr><td>orchestration-api</td><td>Custom (Python 3.12)</td><td>8000</td><td>src/user_skills/ (shared)</td><td>FastAPI Dashboard API (traces, repairs, jobs, agents)</td></tr>
+      <tr><td>orchestration-ui</td><td>nginx + React build</td><td>3001</td><td>—</td><td>Dashboard UI (9 tabs: Overview, Orgs, Agents, Activity, Tools, Skills, Repairs, Jobs, System)</td></tr>
       <tr><td>postgres</td><td>postgres:17</td><td>5432 (internal)</td><td>postgres_data</td><td>Database + APScheduler job store</td></tr>
       <tr><td>qdrant</td><td>qdrant/qdrant</td><td>6333 (internal)</td><td>qdrant_data</td><td>Vector store (Mem0 backend)</td></tr>
       <tr><td>redis</td><td>redis:7</td><td>6379 (internal)</td><td>redis_data</td><td>Sessions, cache, SDK agent sessions</td></tr>
@@ -850,6 +853,9 @@ graph LR
       <tr><td>Tools consolidated into src/</td><td>tools/ merged into src/tools/plugins/</td><td>Single source tree. Linting, typing, imports consistent. Tool Factory writes to same tree.</td></tr>
       <tr><td>Persona interview (Stanford)</td><td>3-session structured OCEAN profiling</td><td>Replicates personality 85% accurately per Stanford research. Deep profile injected into system prompt.</td></tr>
       <tr><td>PruningContentFilter for SPAs</td><td>crawl4ai threshold=0.48 + _clean_markdown()</td><td>LinkedIn pages have 400K+ of JSON blobs. Filter strips noise, post-processor removes tracking data.</td></tr>
+      <tr><td>src/ consolidation</td><td>orchestration-ui, user_skills, config, alembic all under src/</td><td>Single deployment source tree. Root contains only project-level files. Dockerfiles simplified.</td></tr>
+      <tr><td>system_agents registry</td><td><code>src/orchestration/system_agents.py</code> + <code>GET /api/agents/system</code></td><td>All built-in agents visible in Dashboard. Clear separation of system vs. user-created (OrgAgents).</td></tr>
+      <tr><td>Active-org deletion guard</td><td>DELETE /api/orgs/{org_id}/agents/{agent_id} returns 409 if org is active</td><td>Prevents accidental removal of agents from running organizations. UI disables button with tooltip.</td></tr>
     </tbody>
   </table>
 </section>
@@ -997,13 +1003,23 @@ graph LR
       <div class="title">No persistent background monitoring capability</div>
       <div class="desc">Autonomous Background Jobs: BackgroundJob model + APScheduler tick loop + orchestrator monitor-phrase detection + Dashboard Jobs tab with progress and cancel.</div>
     </div>
+    <div class="timeline-item">
+      <div class="date">April 13, 2026</div>
+      <div class="title">System agents not visible in Dashboard (API_BASE/defaultHeaders undefined)</div>
+      <div class="desc">AgentsTab used non-existent fetch/API_BASE/defaultHeaders. Fix: rewrote all API calls with axios and the global API constant. System agents now load correctly.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="date">April 13, 2026</div>
+      <div class="title">Deployment directories scattered at repo root</div>
+      <div class="desc">orchestration-ui, user_skills, config, alembic, alembic.ini lived at root alongside bootstrap files. Fix: src/ consolidation — all deployment files under src/, 14 path references updated, Dockerfiles simplified, docker-compose.yml updated.</div>
+    </div>
   </div>
 </section>
 
 <!-- ========== 11. PROJECT STATISTICS ========== -->
 <section id="stats">
   <h2><span class="section-num">11.</span> Project Statistics</h2>
-  <p class="subtitle">Current state snapshot — Agentic Upgrade M1–M4, April 12, 2026.</p>
+  <p class="subtitle">Current state snapshot — Agentic Upgrade M1–M4 + src/ Consolidation + Agents Tab, April 13, 2026.</p>
 
   <div class="chart-row">
     <div class="chart-box">
@@ -1106,11 +1122,132 @@ graph TB
   </div>
 </section>
 
+<!-- ========== 13. SRC CONSOLIDATION ========== -->
+<section id="src-consolidation">
+  <h2><span class="section-num">13.</span> src/ Consolidation — April 13, 2026</h2>
+  <p class="subtitle">All deployment-relevant directories moved under <code>src/</code>. Root contains only project/bootstrap files.</p>
+
+  <div class="mermaid-wrap">
+    <pre class="mermaid">
+graph LR
+    subgraph Before["Before (repo root)"]
+      direction TB
+      R1["orchestration-ui/"]
+      R2["user_skills/"]
+      R3["config/"]
+      R4["alembic/ + alembic.ini"]
+      R5["src/"]
+    end
+    subgraph After["After (repo root)"]
+      direction TB
+      A1["src/orchestration-ui/"]
+      A2["src/user_skills/"]
+      A3["src/config/"]
+      A4["src/alembic/ + src/alembic.ini"]
+      A5["docker-compose.yml · Dockerfiles · .env · requirements*.txt"]
+    end
+    Before -->|"git mv + filesystem move"| After
+    style Before fill:#2d1f11,stroke:#ffa657,color:#e6edf3
+    style After fill:#1a3a2a,stroke:#3fb950,color:#e6edf3
+    </pre>
+  </div>
+
+  <h3>Files Updated</h3>
+  <table>
+    <thead><tr><th>File</th><th>Change</th></tr></thead>
+    <tbody>
+      <tr><td><code>src/agents/skill_factory_agent.py</code></td><td><code>USER_SKILLS_DIR</code> → <code>Path("src/user_skills")</code></td></tr>
+      <tr><td><code>src/skills/loader.py</code></td><td>Default <code>user_skills_dir</code> → <code>/app/src/user_skills</code></td></tr>
+      <tr><td><code>src/skills/validation.py</code></td><td>All 3 <code>Path("user_skills/{id}")</code> → <code>src/user_skills/</code></td></tr>
+      <tr><td><code>src/agents/orchestrator.py</code></td><td><code>config/persona_default.yaml</code> → <code>src/config/persona_default.yaml</code></td></tr>
+      <tr><td><code>src/orchestration/api.py</code></td><td>All 8 <code>user_skills/</code> path refs → <code>src/user_skills/</code></td></tr>
+      <tr><td><code>src/bot/handlers.py</code></td><td>All 3 <code>user_skills/</code> path refs → <code>src/user_skills/</code></td></tr>
+      <tr><td><code>src/main.py</code></td><td><code>Config("alembic.ini")</code> → <code>Config("src/alembic.ini")</code></td></tr>
+      <tr><td><code>Dockerfile</code></td><td>Removed <code>COPY config/ alembic/ alembic.ini</code> (inside <code>COPY src/</code>)</td></tr>
+      <tr><td><code>Dockerfile.orchestration</code></td><td>Removed <code>COPY alembic/ alembic.ini</code> (inside <code>COPY src/</code>)</td></tr>
+      <tr><td><code>docker-compose.yml</code></td><td>Build context → <code>./src/orchestration-ui</code>; volumes → <code>./src/user_skills:/app/src/user_skills</code></td></tr>
+      <tr><td><code>.gitignore</code></td><td><code>orchestration-ui/node_modules</code> → <code>src/orchestration-ui/node_modules</code></td></tr>
+      <tr><td><code>.dockerignore</code></td><td>Broad <code>orchestration-ui/</code> exclusion → targeted <code>node_modules/</code> and <code>build/</code> only</td></tr>
+    </tbody>
+  </table>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">✅</div>
+      <div class="card-title">Single Source Tree</div>
+      <div class="card-desc">All code that ships in Docker images lives under <code>src/</code>. One <code>COPY src/ ./src/</code> in each Dockerfile covers everything.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🗂️</div>
+      <div class="card-title">Clean Root</div>
+      <div class="card-desc">Root contains only: <code>docker-compose.yml</code>, <code>Dockerfile*</code>, <code>.env</code>, <code>requirements*.txt</code>, <code>pytest.ini</code>, <code>README.md</code>.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🔑</div>
+      <div class="card-title">.env Stays at Root</div>
+      <div class="card-desc"><code>.env</code> and <code>.env.example</code> remain at the project root. Docker Compose reads them from the same directory it is invoked from.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== 14. AGENTS TAB ========== -->
+<section id="agents-tab">
+  <h2><span class="section-num">14.</span> Agents Tab — Dashboard UI</h2>
+  <p class="subtitle">Dedicated tab for browsing system/internal agents and managing organization agents, with deletion constraints enforced on both backend and frontend.</p>
+
+  <div class="mermaid-wrap mermaid-xl">
+    <pre class="mermaid">
+graph TB
+    UI["Dashboard — Agents Tab"]
+    UI --> TOGGLE["ToggleButtonGroup"]
+    TOGGLE -->|"My Agents"| ORG_SEC["AgentsOrgSection\n(table view)"]
+    TOGGLE -->|"System Agents"| SYS_SEC["AgentsSystemSection\n(card grid + category filter)"]
+
+    ORG_SEC -->|"GET /api/agents/org"| ORG_API["OrgAgent rows\n+ org_name, org_status\n+ can_delete, delete_reason"]
+    SYS_SEC -->|"GET /api/agents/system"| SYS_API["SystemAgentInfo list\n(system_agents.py registry)"]
+
+    ORG_SEC -->|"PATCH"| EDIT_DLG["Edit Dialog\n(OrgAgentForm)"]
+    ORG_SEC -->|"DELETE (if can_delete)"| DEL_DLG["Delete Dialog\n(active-org guard)"]
+    DEL_DLG -->|"DELETE /api/orgs/{id}/agents/{id}"| GUARD{"org.status == active?"}
+    GUARD -->|"yes"| BLOCK["409 Conflict"]
+    GUARD -->|"no"| DELETE["Agent deleted"]
+
+    style SYS_API fill:#172336,stroke:#58a6ff,color:#e6edf3
+    style ORG_API fill:#1a2d1a,stroke:#3fb950,color:#e6edf3
+    style BLOCK fill:#3d1418,stroke:#f78166,color:#e6edf3
+    style DELETE fill:#1a3a2a,stroke:#3fb950,color:#e6edf3
+    </pre>
+  </div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">🤖</div>
+      <div class="card-title">System Agents</div>
+      <div class="card-desc">All built-in agents registered in <code>src/orchestration/system_agents.py</code>. Cards show name, category, description, tool count, and capabilities. Filterable by category.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🏢</div>
+      <div class="card-title">Org Agents</div>
+      <div class="card-desc">All user-created <code>OrgAgent</code> rows, joined with their organization's name and status. Edit always available; delete blocked (tooltip) when org is active.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">🛡️</div>
+      <div class="card-title">Active-Org Guard</div>
+      <div class="card-desc">Backend returns 409 if org is active. Frontend disables delete button with a descriptive tooltip. Two-layer enforcement.</div>
+    </div>
+    <div class="card">
+      <div class="card-icon">📡</div>
+      <div class="card-title">New API Endpoints</div>
+      <div class="card-desc"><code>GET /api/agents/system</code> · <code>GET /api/agents/org</code> · Delete guard on <code>DELETE /api/orgs/{org_id}/agents/{agent_id}</code>.</div>
+    </div>
+  </div>
+</section>
+
 </div><!-- /container -->
 
 <footer>
   <div class="container">
-    PersonalAsst Architecture Report — Updated April 12, 2026 &nbsp;|&nbsp; Agentic Upgrade M1–M4 &nbsp;|&nbsp; Private Repository. All rights reserved.
+    PersonalAsst Architecture Report — Updated April 13, 2026 &nbsp;|&nbsp; Agentic Upgrade M1–M4 + src/ Consolidation + Agents Tab &nbsp;|&nbsp; Private Repository. All rights reserved.
   </div>
 </footer>
 

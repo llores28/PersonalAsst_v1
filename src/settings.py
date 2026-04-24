@@ -15,6 +15,34 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="redis://redis:6379/0", description="Redis connection URL")
     qdrant_url: str = Field(default="http://qdrant:6333", description="Qdrant connection URL")
 
+    # ── Multi-LLM Support (Option B Upgrade) ─────────────────────────────
+    multi_llm_enabled: bool = Field(
+        default=False,
+        description="Enable multi-LLM provider support. When false, uses legacy OpenAI-only behavior."
+    )
+    default_llm_provider: str = Field(
+        default="openai",
+        description="Default provider when multi_llm_enabled is true (openai|anthropic|openrouter|google|local)"
+    )
+
+    # ── Provider API Keys (only needed when multi_llm_enabled=true) ───────
+    anthropic_api_key: str = Field(default="", description="Anthropic API key for Claude models")
+    openrouter_api_key: str = Field(default="", description="OpenRouter API key for 200+ models")
+    google_api_key: str = Field(default="", description="Google Gemini API key")
+    local_llm_base_url: str = Field(
+        default="http://localhost:11434/v1",
+        description="Base URL for local LLM (Ollama, vLLM, etc.)"
+    )
+    openrouter_image_enabled: bool = Field(
+        default=False,
+        description="Enable OpenRouter image generation skill and Telegram image replies"
+    )
+
+    # ── Per-Provider Cost Caps ────────────────────────────────────────────
+    anthropic_daily_cost_cap_usd: float = Field(default=5.00)
+    openrouter_daily_cost_cap_usd: float = Field(default=5.00)
+    google_daily_cost_cap_usd: float = Field(default=5.00)
+
     # ── Models (role-based, GPT-5.4 family defaults) ──
     model_orchestrator: str = Field(default="gpt-5.4")
     model_code_gen: str = Field(default="gpt-5.4-mini")  # deprecated alias for model_coding
@@ -43,6 +71,27 @@ class Settings(BaseSettings):
     agent_timeout_seconds: int = Field(default=120)
     tool_subprocess_timeout: int = Field(default=30)
     startup_migrations_enabled: bool = Field(default=False)
+
+    # ── Agent-Managed Skills (Option B Upgrade) ──────────────────────────
+    agent_managed_skills: bool = Field(
+        default=False,
+        description="Enable agent-proposed skill creation from successful workflows"
+    )
+    skill_auto_approve: bool = Field(
+        default=False,
+        description="Skip approval for agent-proposed skills (DANGER: use with caution)"
+    )
+    skill_confidence_threshold: float = Field(
+        default=0.8,
+        description="Minimum agent confidence to propose skill creation (0-1)"
+    )
+    skill_nudge_cooldown_hours: int = Field(
+        default=24,
+        description="Minimum hours between skill creation nudges"
+    )
+
+    # ── User Skills ──
+    user_skills_dir: str = Field(default="src/user_skills", description="Directory for user-installed SKILL.md skills")
 
     # ── Google Workspace (optional, Phase 2+) ──
     google_oauth_client_id: str = Field(default="")

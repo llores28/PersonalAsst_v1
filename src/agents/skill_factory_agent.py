@@ -23,7 +23,7 @@ from src.skills.loader import SkillLoader
 
 logger = logging.getLogger(__name__)
 
-USER_SKILLS_DIR = Path("user_skills")
+USER_SKILLS_DIR = Path("src/user_skills")
 
 SKILL_FACTORY_INSTRUCTIONS = """\
 You are a Skill Factory specialist. You help users create custom skills for their AI assistant.

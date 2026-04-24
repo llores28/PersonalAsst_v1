@@ -1,11 +1,27 @@
 """Google Workspace MCP client — connects to the workspace-mcp sidecar container."""
 
+import asyncio
 import logging
 import re
 import time
 from typing import Any, Optional
 
-from agents.mcp import MCPServerStreamableHttp, MCPServerStreamableHttpParams
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+)
+
+try:
+    from agents.mcp import MCPServerStreamableHttp, MCPServerStreamableHttpParams
+except ImportError:
+    MCPServerStreamableHttp = None  # type: ignore[assignment,misc]
+    MCPServerStreamableHttpParams = None  # type: ignore[assignment,misc]
+    logging.getLogger(__name__).warning(
+        "agents.mcp.MCPServerStreamableHttp not available — "
+        "Google Workspace MCP integration disabled (upgrade openai-agents>=0.13.0)"
+    )
 
 from src.memory.conversation import get_redis
 from src.settings import settings
@@ -28,11 +44,16 @@ def is_google_configured() -> bool:
     return bool(settings.google_oauth_client_id and settings.google_oauth_client_secret)
 
 
-def create_workspace_mcp_server() -> Optional[MCPServerStreamableHttp]:
+def create_workspace_mcp_server():
     """Create the Google Workspace MCP server connection.
 
-    Returns None if Google credentials are not configured.
+    Returns None if Google credentials are not configured or if the
+    agents SDK version does not support MCPServerStreamableHttp.
     """
+    if MCPServerStreamableHttp is None:
+        logger.warning("create_workspace_mcp_server: MCPServerStreamableHttp unavailable — skipping")
+        return None
+
     if not is_google_configured():
         logger.info("Google Workspace not configured — skipping MCP server")
         return None
@@ -80,6 +101,16 @@ def _extract_tool_input_schema(tool: Any) -> dict[str, Any]:
     return schema if isinstance(schema, dict) else {}
 
 
+class _TransientMCPError(Exception):
+    """Raised for transient MCP errors that are safe to retry."""
+
+
+@retry(
+    retry=retry_if_exception_type(_TransientMCPError),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    reraise=True,
+)
 async def call_workspace_tool(tool_name: str, arguments: dict[str, Any]) -> str:
     server = create_workspace_mcp_server()
     if server is None:
@@ -91,7 +122,11 @@ async def call_workspace_tool(tool_name: str, arguments: dict[str, Any]) -> str:
     clean_args = {k: v for k, v in arguments.items() if v is not None}
 
     try:
-        await server.connect()
+        await asyncio.wait_for(server.connect(), timeout=15)
+    except asyncio.TimeoutError:
+        logger.error("Workspace MCP connection timed out for %s", tool_name)
+        await server.cleanup()
+        raise _TransientMCPError(f"Connection timeout for {tool_name}")
     except Exception as conn_err:
         logger.error("Workspace MCP connection failed for %s: %s", tool_name, conn_err)
         await server.cleanup()
@@ -104,7 +139,9 @@ async def call_workspace_tool(tool_name: str, arguments: dict[str, Any]) -> str:
         )
 
     try:
-        result = await server.call_tool(tool_name, clean_args)
+        result = await asyncio.wait_for(
+            server.call_tool(tool_name, clean_args), timeout=45
+        )
         text = _tool_result_to_text(result)
 
         # The MCP server returns errors as tool result content, not as
@@ -122,6 +159,14 @@ async def call_workspace_tool(tool_name: str, arguments: dict[str, Any]) -> str:
             )
 
         return text
+    except asyncio.TimeoutError:
+        logger.error("Workspace tool %s timed out after 45s", tool_name)
+        return (
+            f"[TOOL ERROR] {tool_name} timed out after 45 seconds. "
+            f"The Google Workspace service may be overloaded. "
+            f"Tell the user to try again in a moment. "
+            f"Do NOT use WebSearch as a fallback for private Google Workspace data."
+        )
     except Exception as tool_err:
         error_text = str(tool_err)
         logger.error("Workspace tool %s failed: %s", tool_name, error_text)

@@ -55,7 +55,7 @@
 - **Primary user:** Single non-technical user communicating via Telegram
 - **Secondary users:** None (single-user system)
 - **Internal stakeholders:** Repository owner / developer
-- **External dependencies:** OpenAI API, Google Workspace APIs, Telegram Bot API
+- **External dependencies:** OpenAI API, OpenRouter API, Google Workspace APIs, Telegram Bot API
 
 ## 5) Scope
 
@@ -72,13 +72,13 @@
 
 ### Out of scope (later phases)
 
-- Tool Factory (Phase 5) — dynamic CLI tool creation
-- Scheduling automation (Phase 4) — APScheduler integration
+- Tool Factory (Phase 5) — dynamic CLI tool creation (COMPLETED)
+- Scheduling automation (Phase 4) — APScheduler integration (COMPLETED)
 - WhatsApp / Discord adapters (Phase 6)
 - Voice message transcription (Phase 6)
 - Self-improvement loop / ACE pattern (Phase 3 partial, Phase 6 full)
 
-### Phase 7 — Persona Interview Onboarding (NEW)
+### Phase 7 — Persona Interview Onboarding (COMPLETED)
 
 - Structured conversational interview via Telegram (3 sessions)
 - LLM-powered personality synthesis (Big Five / OCEAN scoring)
@@ -86,6 +86,27 @@
 - Interview progress tracking with resume capability
 - Curator-driven periodic persona re-synthesis from accumulated memories
 - Research basis: Stanford "Generative Agent Simulations" (2024), Cambridge/DeepMind Psychometric Framework (2025)
+
+### Phase 8 — Organization Project Setup (COMPLETED)
+
+- Goal-based project setup via `setup_org_project` tool
+- Automated agent creation with skills and allowed tools
+- Task generation and assignment workflow
+- Dynamic CLI tool creation for organization projects
+- System-binary tool support (FFmpeg, ImageMagick, etc.)
+- Enhanced routing for organization and project requests
+- Real-time validation feedback for tools and skills
+
+### Phase 9 — Dashboard Enhancements (COMPLETED)
+
+- AI-guided Tool Wizard dialog in Dashboard (interview → generate → review → save)
+- Unified cost tracking via shared `record_llm_cost()` helper with single pricing table
+- Duplicate detection (≥ 85% fuzzy-match) on agents, tools, and skills during org project setup
+- Selective org deletion with preview dialog and holding org for retained entities
+- Manual repair ticket creation from Dashboard (AI Agent or Admin pipeline)
+- Interactions drill-down with audit-log drawer and direction filters
+- Tasks vs Jobs clarity with tooltips and documentation
+- Draggable/resizable Overview grid (react-grid-layout) with per-user Redis layout persistence
 
 ## 6) Functional Requirements
 
@@ -111,6 +132,17 @@
 | FR-018 | Deep persona profile — expanded personality schema with communication style, work context, values | P1 | Customization | PersonaVersion.personality JSONB stores OCEAN, communication, work_context, values, synthesis fields |
 | FR-019 | Persona interview progress tracking — multi-session interview state persisted across conversations | P1 | UX | Interview state stored in DB; user can resume interrupted sessions |
 | FR-020 | Curator-driven persona re-synthesis — periodic update of persona profile from accumulated Mem0 memories | P2 | Intelligence | Curator weekly cycle includes persona profile refresh from recent memories |
+| FR-021 | Organization Project Setup — goal-based project creation with automated agent/task/tool generation | P1 | Productivity | "Setup an FFmpeg Video Composer project" creates org, agents, tasks, and CLI tools in <2 minutes |
+| FR-022 | System-Binary Tool Support — safe sandbox execution for FFmpeg, ImageMagick, sox, yt-dlp | P1 | Extensibility | Generated tools using system binaries pass sandbox tests and register successfully |
+| FR-023 | Enhanced Routing — organization and project requests routed to MEDIUM complexity for proper tool access | P1 | UX | "Create a project to X" correctly invokes setup_org_project instead of falling through to GENERAL |
+| FR-024 | Real-time Validation — immediate feedback on tool creation failures and skill registration issues | P1 | UX | Failed tool creations show specific error messages; validation stored in agent config |
+| FR-025 | Tool Wizard — AI-guided tool creation via Dashboard (interview → generate → review → save) | P1 | UX | "AI Wizard" button in Tools tab launches dialog; tool registered on save |
+| FR-026 | Unified Cost Tracking — shared `record_llm_cost()` helper with single pricing table | P1 | Maintainability | All agent calls tracked via one function; no duplicate pricing logic |
+| FR-027 | Duplicate Detection — fuzzy-match ≥ 85% on agents/tools/skills during org project setup | P1 | Intelligence | "Setup X project" reuses existing items instead of duplicating; reports what was reused |
+| FR-028 | Selective Org Deletion — preview dialog + holding org for retained entities | P1 | UX | User can check items to keep; retained entities moved to `__retained__` org |
+| FR-029 | Manual Ticket Creation — open repair tickets from Dashboard with pipeline choice | P2 | UX | "New Ticket" button creates ticket; choose AI Agent or Admin pipeline |
+| FR-030 | Interactions Drill-Down — clickable tile opens drawer with audit-log rows and filters | P1 | Observability | Click Interactions tile → drawer with all/inbound/outbound/errors filters |
+| FR-031 | Draggable Dashboard Grid — customizable Overview layout persisted per user | P1 | UX | 6 tiles draggable/resizable; layout saved in Redis; "Reset Layout" restores defaults |
 
 ## 7) Non-Functional Requirements (NFR)
 

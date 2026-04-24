@@ -4,16 +4,70 @@ Resolves PRD gap B2 (agent registration at runtime) via filesystem watching.
 """
 
 import importlib.util
+import json
 import logging
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from agents import function_tool
+from agents import FunctionTool
 
-from src.tools.manifest import ToolManifest
+from src.tools.manifest import ToolManifest, ToolParameter
 from src.tools.sandbox import run_cli_tool
 
 logger = logging.getLogger(__name__)
+
+
+# Map Python-style type hints from the manifest to JSON Schema types.
+# Unknown types fall back to "string" so tools still register.
+_PY_TO_JSON_TYPE: dict[str, str] = {
+    "str": "string",
+    "string": "string",
+    "int": "integer",
+    "integer": "integer",
+    "float": "number",
+    "number": "number",
+    "bool": "boolean",
+    "boolean": "boolean",
+    "list": "array",
+    "list[str]": "array",
+    "array": "array",
+    "dict": "object",
+    "object": "object",
+}
+
+
+def _manifest_params_to_strict_schema(
+    parameters: dict[str, ToolParameter],
+) -> dict[str, Any]:
+    """Build an OpenAI-strict JSON schema from manifest parameters.
+
+    OpenAI strict mode requires:
+      - ``additionalProperties: false`` on every object.
+      - Every declared property listed in ``required``.
+    Optional manifest params are still included but typed as ``[t, "null"]``
+    so the model can emit ``null`` when skipping them.
+    """
+    properties: dict[str, dict[str, Any]] = {}
+    for name, param in parameters.items():
+        raw_type = (param.type or "str").strip().lower()
+        json_type = _PY_TO_JSON_TYPE.get(raw_type, "string")
+        prop: dict[str, Any] = {}
+        if param.required:
+            prop["type"] = json_type
+        else:
+            prop["type"] = [json_type, "null"]
+        if param.description:
+            prop["description"] = param.description
+        if raw_type in ("list", "array", "list[str]"):
+            prop.setdefault("items", {"type": "string"})
+        properties[name] = prop
+
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": list(properties.keys()),
+        "additionalProperties": False,
+    }
 
 
 class ToolRegistry:
@@ -68,22 +122,44 @@ class ToolRegistry:
         self._manifests[manifest.name] = manifest
         logger.info("Tool registered: %s (type=%s)", manifest.name, manifest.type)
 
-    def _create_cli_wrapper(self, tool_dir: Path, manifest: ToolManifest) -> Callable:
-        """Create a function_tool wrapper that calls a CLI tool via subprocess."""
+    def _create_cli_wrapper(self, tool_dir: Path, manifest: ToolManifest) -> FunctionTool:
+        """Create a FunctionTool that invokes a CLI tool via subprocess.
+
+        The JSON schema is built directly from the manifest's declared parameters
+        so it satisfies OpenAI's strict-schema requirement (no ``additionalProperties``
+        on ``**kwargs``-style signatures).
+        """
         entrypoint = manifest.entrypoint
         timeout = manifest.timeout_seconds
         tool_name = manifest.name
         description = manifest.description
         credential_keys = list(manifest.credentials.keys()) if manifest.credentials else None
 
-        @function_tool(name_override=tool_name, description_override=description)
-        async def cli_wrapper(**kwargs: str) -> str:
-            args = []
-            for key, value in kwargs.items():
-                args.extend([f"--{key}", str(value)])
+        params_schema = _manifest_params_to_strict_schema(manifest.parameters)
+
+        async def _invoke_cli(_ctx: Any, args_json: str) -> str:
+            try:
+                args_dict = json.loads(args_json) if args_json else {}
+            except json.JSONDecodeError:
+                args_dict = {}
+
+            cli_args: list[str] = []
+            for key, value in args_dict.items():
+                if value is None:
+                    continue
+                if isinstance(value, bool):
+                    if value:
+                        cli_args.append(f"--{key}")
+                    continue
+                if isinstance(value, (list, tuple)):
+                    # Pass repeated --key value pairs for array params
+                    for item in value:
+                        cli_args.extend([f"--{key}", str(item)])
+                    continue
+                cli_args.extend([f"--{key}", str(value)])
 
             rc, stdout, stderr = await run_cli_tool(
-                tool_dir, entrypoint, args,
+                tool_dir, entrypoint, cli_args,
                 timeout=timeout,
                 credential_keys=credential_keys,
             )
@@ -92,7 +168,13 @@ class ToolRegistry:
                 return f"Tool error (exit {rc}): {stderr[:500]}"
             return stdout
 
-        return cli_wrapper
+        return FunctionTool(
+            name=tool_name,
+            description=description,
+            params_json_schema=params_schema,
+            on_invoke_tool=_invoke_cli,
+            strict_json_schema=True,
+        )
 
     def _load_function_wrapper(self, tool_dir: Path, manifest: ToolManifest) -> Callable:
         """Load a Python function_tool wrapper from the tool directory.
@@ -199,7 +281,8 @@ async def get_registry() -> ToolRegistry:
     """Get or create the singleton tool registry."""
     global _registry
     if _registry is None:
-        _registry = ToolRegistry(Path("src/tools/plugins"))
+        _plugins_dir = Path(__file__).resolve().parent / "plugins"
+        _registry = ToolRegistry(_plugins_dir)
         await _registry.load_all()
         await _registry.start_watching()
     return _registry

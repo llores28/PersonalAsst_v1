@@ -29,6 +29,44 @@ from src.skills.definition import (
 logger = logging.getLogger(__name__)
 
 
+# Stop words dropped from routing-hint keyword extraction.
+# Kept deliberately small — aggressive filtering hurts recall.
+_STOP_WORDS: frozenset[str] = frozenset({
+    "a", "an", "the", "and", "or", "but", "for", "to", "of", "in", "on", "at",
+    "is", "was", "are", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "will", "would", "could", "should", "may", "might",
+    "this", "that", "these", "those", "with", "when", "where", "what", "which",
+    "who", "why", "how", "not", "use", "using", "from", "into", "onto", "upon",
+    "only", "also", "about", "after", "before", "while", "during", "again",
+    "each", "both", "more", "most", "some", "any", "few", "all", "other",
+    "your", "their", "ours", "theirs", "mine", "yours", "its",
+    "please", "help",
+})
+
+
+def _strip_plural(token: str) -> str:
+    """Cheap singularization: drop common English plural suffixes.
+
+    Keeps small/common words unchanged. Good enough for keyword matching — we
+    do not need full morphology here (and we specifically avoid pulling in a
+    heavy NLP dep for this path, which runs on every turn).
+    """
+    t = token.lower()
+    if len(t) <= 3:
+        return t
+    if t.endswith("ies") and len(t) > 4:
+        return t[:-3] + "y"
+    # Only collapse "-es" when the stem ends in a sibilant-style cluster where
+    # English drops the whole "es" ("boxes"→"box", "matches"→"match",
+    # "dishes"→"dish"). Otherwise just treat the trailing "s" as plural so
+    # "subtitles" → "subtitle", not "subtitl".
+    if t.endswith(("sses", "shes", "ches", "xes", "zes")) and len(t) > 4:
+        return t[:-2]
+    if t.endswith("s") and not t.endswith("ss"):
+        return t[:-1]
+    return t
+
+
 class SkillRegistry:
     """Central registry for all skills available to an agent.
 
@@ -262,11 +300,22 @@ class SkillRegistry:
 
         Rules:
         - INTERNAL skills (memory, scheduler) are always included (lightweight).
-        - KNOWLEDGE skills match based on routing_hints (provide context, not tools).
-        - A skill matches if any word from its routing_hints appears in the message.
-        - If nothing matches, returns all skill IDs (fallback to full).
+        - Tags are high-confidence signals (curated single keywords): exact or
+          plural-stripped match against any message token selects the skill.
+        - Routing hints are matched on whole meaningful tokens (length > 3, not
+          in the stop-word list). Plural forms are stripped so "videos" matches
+          a hint containing "video".
+        - If no user/workspace skill matches, the full active set is returned
+          so we never starve the model of context.
         """
         lowered = user_message.lower()
+        # Normalize tokens in the message once (strip punctuation, drop plurals)
+        message_tokens = {
+            _strip_plural(tok.strip("',\"():.?!"))
+            for tok in lowered.replace("/", " ").split()
+            if tok.strip("',\"():.?!")
+        }
+
         matched: set[str] = set()
 
         for skill in self._skills.values():
@@ -278,29 +327,25 @@ class SkillRegistry:
                 matched.add(skill.id)
                 continue
 
-            # Check routing hints for keyword overlap
+            # 1. Tags (high-confidence): single-word curated keywords.
+            if skill.tags:
+                tag_tokens = {_strip_plural(t.lower().strip()) for t in skill.tags if t}
+                if tag_tokens & message_tokens:
+                    matched.add(skill.id)
+                    continue
+
+            # 2. Routing hints (lower-confidence): token overlap on content words.
             for hint in skill.routing_hints:
-                # Extract meaningful keywords from hints (ignore routing arrows)
                 hint_lower = hint.split("→")[0].lower()
-                keywords = [
-                    w.strip("',\"():")
+                keywords = {
+                    _strip_plural(w.strip("',\"():.?!"))
                     for w in hint_lower.split()
-                    if len(w.strip("',\"():")) > 3
-                    and w.strip("',\"():").lower() not in {
-                        "not", "for", "use", "the", "and", "with", "when",
-                        "from", "that", "this", "into", "only", "also",
-                    }
-                ]
-                if any(kw in lowered for kw in keywords):
+                    if len(w.strip("',\"():.?!")) > 3
+                    and w.strip("',\"():.?!").lower() not in _STOP_WORDS
+                }
+                if keywords & message_tokens:
                     matched.add(skill.id)
                     break
-
-            # Also check tags
-            if skill.id not in matched:
-                for tag in skill.tags:
-                    if tag.lower() in lowered:
-                        matched.add(skill.id)
-                        break
 
         # Fallback: if nothing matched (e.g. generic greeting), load all active
         active_ids = {s.id for s in self._skills.values() if s.is_active}

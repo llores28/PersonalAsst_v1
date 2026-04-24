@@ -1,4 +1,6 @@
 import logging
+import re
+import base64
 from typing import Any
 from urllib.parse import urlparse
 
@@ -162,24 +164,107 @@ async def _handle_connect_request(message: Any, command_text: str | None = None)
         )
 
 
+def _clean_image_caption(raw: str, prompt: str) -> str:
+    """Return a short, human-readable caption for a generated image."""
+    if not raw or raw == prompt:
+        words = prompt.split()
+        summary = " ".join(words[:12])
+        if len(words) > 12:
+            summary += "…"
+        return summary
+    sentences = [s.strip() for s in raw.replace("\n", " ").split(".") if s.strip()]
+    first = sentences[0] if sentences else raw
+    return first[:200] + ("…" if len(first) > 200 else "")
+
+
+async def _send_typing(message: Any) -> None:
+    """Send a single typing action, suppressing any errors."""
+    try:
+        await message.answer_chat_action(action="typing")
+    except Exception:
+        pass
+
+
+def _strip_markdown(text: str) -> str:
+    """Strip common Markdown syntax for cleaner TTS output."""
+    text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
+    text = re.sub(r"_{1,3}(.+?)_{1,3}", r"\1", text)
+    text = re.sub(r"`{1,3}[^`]*`{1,3}", "", text)
+    text = re.sub(r"#+\s*", "", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"^\s*[-*>]\s+", "", text, flags=re.MULTILINE)
+    return text.strip()
+
+
+async def _maybe_send_tts_reply(message: Any, text: str) -> None:
+    """If the session has wants_audio_reply=true, synthesize speech and send as voice."""
+    if not text:
+        return
+    try:
+        from aiogram.types import BufferedInputFile
+        from src.memory.conversation import get_session_field, delete_session_field
+        from src.bot.voice import synthesize_speech
+
+        flag = await get_session_field(message.from_user.id, "wants_audio_reply")
+        if flag != "true":
+            return
+
+        try:
+            await message.answer_chat_action(action="record_voice")
+        except Exception:
+            pass
+
+        clean_text = _strip_markdown(text)
+        audio_bytes = await synthesize_speech(clean_text, telegram_id=message.from_user.id)
+        voice_file = BufferedInputFile(audio_bytes, filename="response.mp3")
+        await message.answer_voice(voice=voice_file)
+        await delete_session_field(message.from_user.id, "wants_audio_reply")
+    except Exception as exc:
+        logger.warning("TTS voice reply failed: %s", exc)
+
+
 async def _run_orchestrator_with_text(message: Any, text: str) -> None:
     """Run the orchestrator agent with given text (supports voice transcription).
 
     This is the canonical implementation — handlers.py imports from here.
     """
-    from src.agents.orchestrator import run_orchestrator
+    from aiogram.types import BufferedInputFile
+    from src.agents.orchestrator import run_orchestrator_result
     from agents.exceptions import (
         InputGuardrailTripwireTriggered,
         OutputGuardrailTripwireTriggered,
         MaxTurnsExceeded,
     )
 
+    await _send_typing(message)
+
     try:
-        response_text = await run_orchestrator(
+        result = await run_orchestrator_result(
             user_telegram_id=message.from_user.id,
             user_message=text,
         )
-        await _answer_with_markdown_fallback(message, response_text)
+        if result.images:
+            for index, image in enumerate(result.images, start=1):
+                try:
+                    await message.answer_chat_action(action="upload_photo")
+                except Exception:
+                    pass
+                photo = BufferedInputFile(
+                    base64.b64decode(image.data_base64),
+                    filename=f"openrouter-image-{index}.png",
+                )
+                caption = _clean_image_caption(image.caption, image.prompt)
+                try:
+                    await message.answer_photo(photo=photo, caption=caption)
+                except Exception as exc:
+                    logger.warning("Failed to send generated image: %s", exc)
+            if result.text:
+                await _answer_with_markdown_fallback(message, result.text)
+        else:
+            await _answer_with_markdown_fallback(message, result.text)
+
+        # TTS: send voice reply if user requested audio
+        await _maybe_send_tts_reply(message, result.text)
     except InputGuardrailTripwireTriggered:
         await message.answer(
             "Sorry, my safety filter flagged that message. "
@@ -215,11 +300,22 @@ async def _run_orchestrator_with_text(message: Any, text: str) -> None:
                 sdk_session = await _get_agent_session(message.from_user.id)
                 if sdk_session is not None:
                     await sdk_session.clear()
-                response_text = await run_orchestrator(
+                result = await run_orchestrator_result(
                     user_telegram_id=message.from_user.id,
                     user_message=text,
                 )
-                await _answer_with_markdown_fallback(message, response_text)
+                if result.images:
+                    for index, image in enumerate(result.images, start=1):
+                        photo = BufferedInputFile(
+                            base64.b64decode(image.data_base64),
+                            filename=f"openrouter-image-{index}.png",
+                        )
+                        caption = _clean_image_caption(image.caption, image.prompt)
+                        await message.answer_photo(photo=photo, caption=caption)
+                    if result.text:
+                        await _answer_with_markdown_fallback(message, result.text)
+                else:
+                    await _answer_with_markdown_fallback(message, result.text)
                 return
             except Exception as retry_exc:
                 logger.exception("Retry after session clear also failed: %s", retry_exc)
@@ -229,6 +325,17 @@ async def _run_orchestrator_with_text(message: Any, text: str) -> None:
             await message.answer(
                 "The assistant model is configured incorrectly right now. "
                 "I need to update the OpenAI model setting before I can help with that."
+            )
+            return
+        if "OpenRouter daily cost cap" in error_text:
+            await message.answer(
+                "Image generation is paused — the daily OpenRouter budget has been reached. "
+                "It resets at midnight, or you can increase `OPENROUTER_DAILY_COST_CAP_USD` in your `.env`."
+            )
+            return
+        if "OpenRouter" in error_text or "generate_image" in error_text or "analyze_image" in error_text:
+            await message.answer(
+                "Image generation failed. The model may be temporarily unavailable — please try again in a moment."
             )
             return
         await message.answer("Something went wrong. I've logged the error. Please try again.")

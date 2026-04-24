@@ -32,11 +32,13 @@ docs/
 *.md
 !README.md
 
-# Frontend — built separately via orchestration-ui Dockerfile
-orchestration-ui/
+# Frontend node_modules/build artifacts — built separately inside container
+src/orchestration-ui/node_modules/
+src/orchestration-ui/build/
 
-# Test suite (not needed in production image)
-tests/
+# Test runtime artifacts (exclude cache but keep source so pytest runs inside container)
+.pytest_cache/
+tests/__pycache__/
 
 # Temp / cache
 .tmp/
@@ -44,7 +46,6 @@ tests/
 .cache/
 .ruff_cache/
 .mypy_cache/
-.pytest_cache/
 htmlcov/
 .coverage
 coverage.xml

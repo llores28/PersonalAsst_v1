@@ -17,7 +17,10 @@ class TestActionPolicyClassification:
             "please add to my task for tomorrow to place grocery order at 9am on the app h-e-b"
         )
         assert decision.action_class == "internal_write"
-        assert decision.requires_confirmation is True
+        # Benign internal writes (reminders/tasks/org create/update) intentionally
+        # skip confirmation per src/action_policy.py:155-162 — the user already
+        # expressed the intent, an extra prompt would be friction.
+        assert decision.requires_confirmation is False
 
     def test_classify_draft_request(self) -> None:
         decision = classify_action_request("draft an email to Sam about the meeting")
@@ -40,7 +43,7 @@ class TestActionPolicyClassification:
             ("show my drive files", "read", False),
             ("add lunch with Sam to my calendar next Sunday at 1pm", "external_side_effect", True),
             ("share file from my drive with Sam", "external_side_effect", True),
-            ("please add to my task for tomorrow to place grocery order at 9am", "internal_write", True),
+            ("please add to my task for tomorrow to place grocery order at 9am", "internal_write", False),
             ("complete this task", "internal_write", False),
             ("send it", "internal_write", False),
             ("send the draft email", "internal_write", False),

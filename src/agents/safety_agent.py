@@ -5,7 +5,11 @@ import re
 
 from agents import Agent, Runner, GuardrailFunctionOutput
 
+from src.action_policy import is_contextual_follow_up_confirmation
 from src.models.router import ModelRole, select_model
+
+# Alias used by tests and internal callers
+_is_contextual_follow_up_confirmation = is_contextual_follow_up_confirmation
 
 logger = logging.getLogger(__name__)
 
@@ -78,31 +82,6 @@ def _is_owner_maintenance_request(text_lower: str) -> bool:
         "connection issue",
     )
     return any(phrase in text_lower for phrase in maintenance_phrases)
-
-
-def _is_contextual_follow_up_confirmation(text_lower: str) -> bool:
-    normalized = " ".join(text_lower.split())
-    return normalized in {
-        "yes",
-        "yes please",
-        "yeah",
-        "yep",
-        "ok",
-        "okay",
-        "retry",
-        "try again",
-        "please retry",
-        "go ahead",
-        "do it",
-        "send",
-        "send it",
-        "send now",
-        "send the email",
-        "send the draft",
-        "send the draft email",
-        "yes send it",
-        "ready to send",
-    }
 
 
 def _is_first_party_workspace_request(text_lower: str) -> bool:
@@ -315,7 +294,7 @@ async def safety_check_guardrail(ctx, agent, input_text) -> GuardrailFunctionOut
                 output_info={"reason": f"Blocked: suspected prompt injection ({pattern})"},
             )
 
-    if _is_contextual_follow_up_confirmation(text_lower):
+    if is_contextual_follow_up_confirmation(text_lower):
         return GuardrailFunctionOutput(
             tripwire_triggered=False,
             output_info={"reason": "Input passed contextual follow-up confirmation check"},
@@ -366,7 +345,18 @@ async def safety_check_guardrail(ctx, agent, input_text) -> GuardrailFunctionOut
             )
     except Exception as e:
         logger.error("Safety check LLM call failed: %s", e)
-        # Fail open — don't block the user if the safety check itself fails
+        # Fail closed — if the LLM safety check itself errors, block the
+        # message so that an OpenAI outage doesn't silently disable all
+        # safety checks.  The fast pattern matcher already allowed through
+        # known-safe categories (owner maintenance, workspace requests)
+        # above, so only genuinely unclassified messages reach this point.
+        return GuardrailFunctionOutput(
+            tripwire_triggered=True,
+            output_info={
+                "reason": "Safety check unavailable — message blocked as a precaution. Please try again.",
+                "llm_error": str(e),
+            },
+        )
 
     return GuardrailFunctionOutput(
         tripwire_triggered=False,

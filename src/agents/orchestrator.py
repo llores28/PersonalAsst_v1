@@ -3,6 +3,7 @@
 import logging
 import re
 import time as _time
+import json
 from dataclasses import dataclass as _dataclass
 from datetime import datetime, timedelta, timezone as datetime_timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ from src.skills.google_workspace import (
     build_contacts_skill,
 )
 from src.skills.internal import build_memory_skill, build_organization_skill, build_scheduler_skill
+from src.skills.openrouter import build_openrouter_skill
 from src.skills.dynamic import load_dynamic_skills
 from src.integrations.workspace_mcp import (
     call_workspace_tool,
@@ -46,6 +48,19 @@ from src.temporal import append_temporal_context, parse_calendar_time_range, par
 logger = logging.getLogger(__name__)
 
 
+_IMAGE_REQUEST_VERBS = (
+    "create image",
+    "create an image",
+    "generate image",
+    "generate an image",
+    "make image",
+    "make an image",
+    "draw",
+    "render",
+    "illustrate",
+)
+
+
 @_dataclass
 class _CachedRegistry:
     registry: SkillRegistry
@@ -54,8 +69,72 @@ class _CachedRegistry:
     created_at: float
 
 
+@_dataclass
+class ImageAttachment:
+    data_base64: str
+    mime_type: str
+    prompt: str = ""
+    caption: str = ""
+    model: str = ""
+
+
+@_dataclass
+class OrchestratorResult:
+    text: str
+    images: list[ImageAttachment]
+
+
 _registry_cache: dict[int, _CachedRegistry] = {}
 _REGISTRY_CACHE_TTL = 30.0  # seconds
+
+# Background task tracking — prevents GC of fire-and-forget tasks
+_background_tasks: set = set()
+
+
+def _fire_and_forget(coro) -> None:
+    """Schedule a coroutine as a background task with proper error handling."""
+    import asyncio
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_on_background_task_done)
+
+
+def _on_background_task_done(task) -> None:
+    """Callback for background tasks — logs exceptions, removes from tracking set."""
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("Background task failed: %s: %s", type(exc).__name__, exc)
+
+
+async def _notify_owner_error(user_telegram_id: int, user_message: str, response_text: str) -> None:
+    """Fire-and-forget: push a proactive Telegram alert when a tool error is detected."""
+    try:
+        from src.bot.notifications import notify_owner_of_error
+        # Use multi-token failure phrases (same set as detector) to pick the summary
+        # line — avoids lifting bullet points like "troubleshooting media errors".
+        _failure_words = (
+            "tool call failed", "tool failed", "tool error", "skill failed",
+            "unable to call", "unable to run", "failed to call", "failed to run",
+            "api call failed", "api error", "mcp error", "connection error",
+            "connection failed", "authentication failed", "permission denied",
+            "traceback", "exception occurred", "internal error", "something went wrong",
+        )
+        lines = [ln.strip() for ln in response_text.splitlines() if ln.strip()]
+        summary = next(
+            (ln for ln in lines if any(w in ln.lower() for w in _failure_words)),
+            "A tool or skill failure was detected."
+        )
+        await notify_owner_of_error(
+            user_telegram_id=user_telegram_id,
+            error_summary=summary[:300],
+            user_message=user_message,
+        )
+    except Exception as exc:
+        logger.debug("_notify_owner_error failed (non-critical): %s", exc)
+
 
 _REPAIR_EXPLICIT_PHRASES = (
     "repair agent",
@@ -157,20 +236,74 @@ _FAILED_REPAIR_HANDOFF_PHRASES = (
     "turn this into a repair request",
 )
 
-# Phrases in Atlas's response that indicate a tool call failed
+# Multi-token phrases that strongly indicate a real tool/skill runtime failure.
+# Single words like "error" or "tool" are intentionally excluded — they appear
+# in normal planning and advice responses and cause false positives.
 _ERROR_RESPONSE_INDICATORS = (
-    "error",
-    "failed",
-    "unable to",
-    "not able to",
-    "couldn't",
-    "could not",
-    "broken",
-    "miswired",
-    "schema",
-    "rejected",
-    "exception",
+    "tool call failed",
+    "tool failed",
+    "tool error",
+    "skill failed",
+    "skill error",
+    "unable to call",
+    "unable to run",
+    "unable to execute",
+    "failed to call",
+    "failed to run",
+    "failed to execute",
+    "couldn't call",
+    "could not call",
+    "could not run",
+    "could not execute",
+    "api call failed",
+    "api error",
+    "mcp error",
+    "connection error",
+    "connection failed",
+    "authentication failed",
+    "permission denied",
     "traceback",
+    "exception occurred",
+    "unhandled exception",
+    "internal error",
+    "something went wrong",
+    "miswired",
+)
+# Suppression: if the response looks like planning/advice/informational,
+# do NOT trigger the error detector even if an indicator phrase matches.
+_ERROR_SUPPRESSION_PATTERNS = (
+    "here's what",
+    "here is what",
+    "recommended",
+    "you could",
+    "you can",
+    "i can help",
+    "i can set up",
+    "if you want",
+    "best specialist",
+    "useful tools",
+    "useful skills",
+    "core skills",
+    "example tasks",
+    "recommended agent",
+    "here are",
+    "here's a",
+    "let me know",
+    "would you like",
+    "want me to",
+    # Project/org setup summaries contain validation warnings like
+    # "⚠️ not registered" or "⚠️ not installed" for planned-but-missing
+    # skills/tools. These are informational, NOT runtime tool errors.
+    "project created",
+    "plan added to",
+    "organization has been created",
+    "agents created",
+    "tasks created",
+    "cli tools",
+    "skills (",
+    "validation issue",
+    "not registered",
+    "not installed",
 )
 _ERROR_TOOL_CONTEXT_TERMS = (
     "tool",
@@ -206,7 +339,7 @@ _FIX_IT_CUES = (
 
 def _load_persona_config() -> dict:
     """Load persona from config file (fallback when DB persona not yet created)."""
-    config_path = Path("config/persona_default.yaml")
+    config_path = Path(__file__).resolve().parents[2] / "src" / "config" / "persona_default.yaml"
     if config_path.exists():
         with open(config_path) as f:
             return yaml.safe_load(f)
@@ -1592,14 +1725,6 @@ def _ensure_gmail_write_tool_success(result_text: str) -> None:
         raise RuntimeError(result_text.strip())
 
 
-def _format_connected_gmail_write_error(action: str, connected_google_email: str, exc: Exception) -> str:
-    return (
-        f"I couldn't {action} from `{connected_google_email}` right now. "
-        f"Gmail returned: {exc}. "
-        f"If this keeps happening, try `/connect google {connected_google_email}` again."
-    )
-
-
 async def _maybe_handle_pending_connected_gmail_send(
     user_telegram_id: int,
     user_message: str,
@@ -1699,7 +1824,7 @@ async def create_orchestrator_async(
     user_name: str = "there",
     task_context: str = "(No task-local context yet)",
     scheduler_user_id: int | None = None,
-    org_user_id: int | None = None,
+    org_user_id: int | None = None,  # kept for backward compat, not used
     recent_context_override: str | None = None,
     complexity: TaskComplexity | None = None,
     user_message: str = "",
@@ -1737,7 +1862,10 @@ async def create_orchestrator_async(
         # Internal skills
         skill_registry.register(build_memory_skill(user_id))
         skill_registry.register(build_scheduler_skill(scheduler_user_id or user_id))
-        skill_registry.register(build_organization_skill(org_user_id or user_id))
+        # Always pass the Telegram ID — _build_bound_org_tools resolves it to DB PK internally
+        skill_registry.register(build_organization_skill(user_id))
+        if settings.openrouter_image_enabled:
+            skill_registry.register(build_openrouter_skill(user_id))
 
         # Dynamic CLI/function skills from src/tools/plugins/ directory
         for dyn_skill in await load_dynamic_skills():
@@ -2012,13 +2140,20 @@ def _response_indicates_failed_repair_handoff(response_text: str) -> bool:
 
 
 def _response_has_tool_error(response_text: str) -> bool:
-    """Detect whether Atlas's response indicates a tool call failure."""
+    """Detect whether Atlas's response indicates a real tool call failure.
+
+    Uses multi-token failure phrases to avoid false positives on planning,
+    advice, or informational responses that mention 'error' or 'tool' in
+    a non-failure context (e.g., 'troubleshooting media errors').
+    """
     lowered = " ".join((response_text or "").strip().lower().split())
     if not lowered:
         return False
-    has_error = any(ind in lowered for ind in _ERROR_RESPONSE_INDICATORS)
-    has_tool_context = any(term in lowered for term in _ERROR_TOOL_CONTEXT_TERMS)
-    return has_error and has_tool_context
+    # Suppress on clear planning/advice/informational responses
+    if any(pat in lowered for pat in _ERROR_SUPPRESSION_PATTERNS):
+        return False
+    # Require a multi-token failure phrase (not just a bare word like 'error')
+    return any(ind in lowered for ind in _ERROR_RESPONSE_INDICATORS)
 
 
 async def _is_fix_it_with_context(user_telegram_id: int, user_message: str) -> bool:
@@ -2074,6 +2209,80 @@ def _prepare_orchestrator_input(user_message: str) -> str:
     return f"{temporal_context}{action_policy_block}"
 
 
+def _looks_like_explicit_image_generation_request(user_message: str) -> bool:
+    lowered = " ".join((user_message or "").strip().lower().split())
+    if not lowered:
+        return False
+    if not any(verb in lowered for verb in _IMAGE_REQUEST_VERBS):
+        return False
+    image_terms = ("image", "picture", "photo", "art", "artwork", "illustration", "logo")
+    return any(term in lowered for term in image_terms) or "draw" in lowered or "render" in lowered
+
+
+async def _maybe_handle_direct_image_analysis(user_telegram_id: int, user_message: str) -> str | None:
+    """If the session has a pending uploaded image, analyze it directly without LLM routing."""
+    if not settings.openrouter_image_enabled or not settings.openrouter_api_key:
+        return None
+
+    from src.memory.conversation import get_session_field, delete_session_field
+
+    try:
+        raw_payload = await get_session_field(user_telegram_id, "latest_uploaded_image")
+    except Exception:
+        return None
+    if not raw_payload:
+        return None
+
+    import base64 as _base64
+    payload = json.loads(raw_payload)
+    image_base64 = payload.get("data_base64")
+    mime_type = payload.get("mime_type") or "image/jpeg"
+    if not image_base64:
+        return None
+
+    from src.integrations.openrouter import analyze_image
+
+    result = await analyze_image(
+        user_id=user_telegram_id,
+        prompt=user_message,
+        image_bytes=_base64.b64decode(image_base64),
+        mime_type=mime_type,
+    )
+    await delete_session_field(user_telegram_id, "latest_uploaded_image")
+    return result.analysis
+
+
+async def _maybe_handle_direct_image_generation(user_telegram_id: int, user_message: str) -> str | None:
+    if not _looks_like_explicit_image_generation_request(user_message):
+        return None
+
+    if not settings.openrouter_image_enabled:
+        return (
+            "Image generation is currently disabled in Atlas. "
+            "Enable `OPENROUTER_IMAGE_ENABLED=true` and restart the assistant container."
+        )
+    if not settings.openrouter_api_key:
+        return (
+            "Image generation is not configured yet because `OPENROUTER_API_KEY` is missing in the running assistant container."
+        )
+
+    from src.integrations.openrouter import generate_image
+    from src.memory.conversation import set_session_field
+
+    result = await generate_image(user_id=user_telegram_id, prompt=user_message)
+    payload = json.dumps([
+        {
+            "data_base64": result.data_base64,
+            "mime_type": result.mime_type,
+            "prompt": result.prompt,
+            "caption": result.revised_prompt,
+            "model": result.model,
+        }
+    ])
+    await set_session_field(user_telegram_id, "pending_image_attachments", payload)
+    return f"Generated your image with `{result.model}`."
+
+
 def _keep_recent_session_history(history: list, new_input: list) -> list:
     """Session input callback: keep only text messages, strip tool call items.
 
@@ -2125,6 +2334,90 @@ async def _add_direct_response_to_session(
         logger.debug("Failed to add direct response to SDK session: %s", e)
 
 
+def _extract_generated_images(result) -> list[ImageAttachment]:
+    images: list[ImageAttachment] = []
+    call_names: dict[str, str] = {}
+    for item in getattr(result, "new_items", None) or []:
+        item_type = type(item).__name__
+        if item_type in ("FunctionCallItem", "ToolCallItem"):
+            call_id = getattr(item, "call_id", None) or getattr(item, "id", "")
+            tool_name = getattr(item, "name", None) or getattr(item, "tool_name", None) or ""
+            if call_id and tool_name:
+                call_names[call_id] = tool_name
+            continue
+
+        if item_type not in ("FunctionCallOutputItem", "ToolCallOutputItem"):
+            continue
+
+        call_id = getattr(item, "call_id", None) or ""
+        if call_names.get(call_id) != "generate_image":
+            continue
+
+        raw_output = getattr(item, "output", None)
+        if not isinstance(raw_output, str):
+            continue
+
+        try:
+            payload = json.loads(raw_output)
+        except json.JSONDecodeError:
+            logger.debug("generate_image tool output was not JSON")
+            continue
+
+        if payload.get("kind") != "openrouter_image":
+            continue
+
+        data_base64 = payload.get("data_base64")
+        mime_type = payload.get("mime_type") or "image/png"
+        if not data_base64:
+            continue
+
+        images.append(
+            ImageAttachment(
+                data_base64=data_base64,
+                mime_type=mime_type,
+                prompt=payload.get("prompt") or "",
+                caption=payload.get("revised_prompt") or "",
+                model=payload.get("model") or "",
+            )
+        )
+
+    return images
+
+
+async def run_orchestrator_result(user_telegram_id: int, user_message: str) -> OrchestratorResult:
+    try:
+        from src.memory.conversation import delete_session_field
+
+        await delete_session_field(user_telegram_id, "pending_image_attachments")
+    except Exception as exc:
+        logger.debug("Failed to clear stale image attachments: %s", exc)
+
+    text = await run_orchestrator(user_telegram_id, user_message)
+    images: list[ImageAttachment] = []
+    try:
+        from src.memory.conversation import delete_session_field, get_session_field
+
+        raw_payload = await get_session_field(user_telegram_id, "pending_image_attachments")
+        if raw_payload:
+            payload = json.loads(raw_payload)
+            images = [
+                ImageAttachment(
+                    data_base64=item.get("data_base64") or "",
+                    mime_type=item.get("mime_type") or "image/png",
+                    prompt=item.get("prompt") or "",
+                    caption=item.get("caption") or "",
+                    model=item.get("model") or "",
+                )
+                for item in payload
+                if item.get("data_base64")
+            ]
+            await delete_session_field(user_telegram_id, "pending_image_attachments")
+    except Exception as exc:
+        logger.debug("Failed to load pending image attachments: %s", exc)
+
+    return OrchestratorResult(text=text, images=images)
+
+
 async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
     """Run the orchestrator agent on a user message and return the response text.
 
@@ -2149,6 +2442,24 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
             user_name = user.display_name or "there"
             user_db_id = user.id
 
+    # ── Log inbound message to AuditLog for Activity tab visibility ────
+    _inbound_audit_id: int | None = None
+    try:
+        from src.db.models import AuditLog as _AuditLog
+        _inbound_entry = _AuditLog(
+            user_id=user_db_id or None,
+            direction="inbound",
+            platform="telegram",
+            agent_name=None,
+            message_text=user_message,
+        )
+        async with async_session() as _asess:
+            _asess.add(_inbound_entry)
+            await _asess.commit()
+            _inbound_audit_id = _inbound_entry.id
+    except Exception as _ae:
+        logger.debug("Inbound audit log failed (non-critical): %s", _ae)
+
     # Record user message in conversation session (state management)
     await add_turn(user_telegram_id, "user", user_message)
     history = await get_conversation_history(user_telegram_id)
@@ -2170,8 +2481,7 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
         await add_turn(user_telegram_id, "assistant", response_text)
         await _add_direct_response_to_session(user_telegram_id, user_message, response_text)
 
-        import asyncio
-        asyncio.create_task(
+        _fire_and_forget(
             _run_reflector_background(
                 user_message, response_text, str(user_telegram_id)
             )
@@ -2183,8 +2493,7 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
         await add_turn(user_telegram_id, "assistant", response_text)
         await _add_direct_response_to_session(user_telegram_id, user_message, response_text)
 
-        import asyncio
-        asyncio.create_task(
+        _fire_and_forget(
             _run_reflector_background(
                 user_message, response_text, str(user_telegram_id)
             )
@@ -2226,6 +2535,24 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
         await add_turn(user_telegram_id, "assistant", direct_google_tasks_response)
         await _add_direct_response_to_session(user_telegram_id, user_message, direct_google_tasks_response)
         return direct_google_tasks_response
+
+    direct_image_analysis_response = await _maybe_handle_direct_image_analysis(
+        user_telegram_id,
+        user_message,
+    )
+    if direct_image_analysis_response is not None:
+        await add_turn(user_telegram_id, "assistant", direct_image_analysis_response)
+        await _add_direct_response_to_session(user_telegram_id, user_message, direct_image_analysis_response)
+        return direct_image_analysis_response
+
+    direct_image_response = await _maybe_handle_direct_image_generation(
+        user_telegram_id,
+        user_message,
+    )
+    if direct_image_response is not None:
+        await add_turn(user_telegram_id, "assistant", direct_image_response)
+        await _add_direct_response_to_session(user_telegram_id, user_message, direct_image_response)
+        return direct_image_response
 
     # ── M2: Autonomous background job (monitor/watch requests) ────────
     try:
@@ -2286,8 +2613,7 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
             response_text = await run_parallel_tasks(_tasks, user_telegram_id, user_name)
             await add_turn(user_telegram_id, "assistant", response_text)
             await _add_direct_response_to_session(user_telegram_id, user_message, response_text)
-            import asyncio
-            asyncio.create_task(
+            _fire_and_forget(
                 _run_reflector_background(user_message, response_text, str(user_telegram_id))
             )
             return response_text
@@ -2327,46 +2653,47 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
             context={"user_message": user_message},
         )
         response_text = result.final_output
+        image_attachments = _extract_generated_images(result)
 
-        # ── Record cost for this turn ──────────────────────────────────
+        # ── Record cost for this turn (shared helper) ─────────────────
+        from src.models.cost_tracker import record_llm_cost
+        await record_llm_cost(
+            result=result,
+            agent=agent,
+            user_db_id=user_db_id,
+            user_telegram_id=user_telegram_id,
+        )
+
+        # ── Log outbound response to AuditLog (every turn) ────────────
+        _outbound_audit_id: int | None = None
         try:
+            import time as _t
+            from src.db.session import async_session as _async_session
+            from src.db.models import AuditLog as _AuditLog
             _usage = getattr(result, "usage", None)
-            if _usage and user_db_id:
-                _in_tok = getattr(_usage, "input_tokens", 0) or 0
-                _out_tok = getattr(_usage, "output_tokens", 0) or 0
-                _total_tok = _in_tok + _out_tok
-                # Price lookup by model (per 1M tokens; rough mid-tier defaults)
-                _model_id = agent.model if hasattr(agent, "model") else ""
-                if "mini" in str(_model_id):
-                    _cost = (_in_tok * 0.15 + _out_tok * 0.60) / 1_000_000
-                elif "nano" in str(_model_id):
-                    _cost = (_in_tok * 0.075 + _out_tok * 0.30) / 1_000_000
-                else:
-                    _cost = (_in_tok * 2.50 + _out_tok * 10.00) / 1_000_000
-                from sqlalchemy.dialects.postgresql import insert as pg_insert
-                from src.db.session import async_session as _async_session
-                from src.db.models import DailyCost as _DailyCost
-                from datetime import date as _date
-                async with _async_session() as _cs:
-                    _stmt = pg_insert(_DailyCost).values(
-                        date=_date.today(),
-                        user_id=user_db_id,
-                        total_tokens=_total_tok,
-                        total_cost_usd=_cost,
-                        request_count=1,
-                    ).on_conflict_do_update(
-                        index_elements=["date", "user_id"],
-                        set_={
-                            "total_tokens": _DailyCost.total_tokens + _total_tok,
-                            "total_cost_usd": _DailyCost.total_cost_usd + _cost,
-                            "request_count": _DailyCost.request_count + 1,
-                        },
-                    )
-                    await _cs.execute(_stmt)
-                    await _cs.commit()
-                logger.debug("Cost recorded: $%.6f (%d tokens) for user %s", _cost, _total_tok, user_db_id)
-        except Exception as _ce:
-            logger.debug("Cost tracking failed (non-critical): %s", _ce)
+            _tokens = (getattr(_usage, "total_tokens", None) if _usage else None)
+            _last_ag = getattr(result, "last_agent", None)
+            _ag_name = getattr(_last_ag, "name", None) or "orchestrator"
+            _model_name: str | None = None
+            try:
+                _model_name = getattr(agent, "model", None) or None
+            except Exception:
+                pass
+            _outbound_entry = _AuditLog(
+                user_id=user_db_id or None,
+                direction="outbound",
+                platform="telegram",
+                agent_name=_ag_name,
+                message_text=response_text,
+                token_count=_tokens,
+                model_used=_model_name,
+            )
+            async with _async_session() as _osess:
+                _osess.add(_outbound_entry)
+                await _osess.commit()
+                _outbound_audit_id = _outbound_entry.id
+        except Exception as _oe:
+            logger.debug("Outbound audit log failed (non-critical): %s", _oe)
 
         # ── Record step-by-step thought trace (M3 observability) ──────
         try:
@@ -2404,6 +2731,7 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
                             or (agent.name if hasattr(agent, "name") else None)
                         )
                         _trace_rows.append(_AgentTrace(
+                            audit_log_id=_outbound_audit_id,
                             session_key=_session_key,
                             step_index=_step,
                             agent_name=_agent_name_trace,
@@ -2453,6 +2781,11 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
             })
             logger.info("Stored tool error context for user %s (repair agent can access it)", user_telegram_id)
 
+            # Proactively notify owner via Telegram so they don't have to discover errors manually
+            _fire_and_forget(
+                _notify_owner_error(user_telegram_id, user_message, response_text)
+            )
+
             # Also persist to Postgres for durable debugging via dashboard/agents
             try:
                 from src.db.session import async_session as _async_session
@@ -2478,12 +2811,28 @@ async def run_orchestrator(user_telegram_id: int, user_message: str) -> str:
         await add_turn(user_telegram_id, "assistant", response_text)
 
         # Run reflector asynchronously (don't block the response)
-        import asyncio
-        asyncio.create_task(
+        _fire_and_forget(
             _run_reflector_background(
                 user_message, response_text, str(user_telegram_id)
             )
         )
+
+        if image_attachments:
+            try:
+                from src.memory.conversation import set_session_field
+                payload = json.dumps([
+                    {
+                        "data_base64": img.data_base64,
+                        "mime_type": img.mime_type,
+                        "prompt": img.prompt,
+                        "caption": img.caption,
+                        "model": img.model,
+                    }
+                    for img in image_attachments
+                ])
+                await set_session_field(user_telegram_id, "pending_image_attachments", payload)
+            except Exception as exc:
+                logger.debug("Failed to persist image attachments: %s", exc)
 
         return response_text
     except Exception as e:

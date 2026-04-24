@@ -2,9 +2,9 @@
 
 ## Current Status
 
-**Phase:** All core phases (1–9) implemented and operational  
-**Date:** April 12, 2026  
-**Test suite:** 540+ passing (21 test files + 5 new), 30 pre-existing SDK-absent failures (import-only, pass in Docker)
+**Phase:** All core phases (1–9) + Dashboard Enhancements (Phases 1–8) implemented and operational  
+**Date:** April 23, 2026  
+**Test suite:** 841+ passing (23+ test files), pre-existing failures (FunctionTool/redis mock issues, unrelated to recent work)
 
 ## What Exists
 
@@ -86,6 +86,12 @@
 | Mar 20 | Reminder tool errored | `DateTrigger(run_date=...)` — APScheduler 4.x uses `run_time` | Changed to `DateTrigger(run_time=...)` |
 | Mar 20 | `FunctionTool object is not callable` | Bound tools called `@function_tool` objects directly | Extracted `_*_impl` pattern |
 | Mar 20 | Repair agent hallucinated patches | No codebase access but fabricated file paths | Honest instructions about limitations |
+| Apr 22 | No proactive error alerts | Errors silently stored in Redis, user had to ask | `_notify_owner_error()` fires Telegram push on every tool error |
+| Apr 22 | Low-risk auto-apply was silent | `propose_low_risk_fix` logged but never pushed notification | Now sends Telegram push after auto-apply |
+| Apr 22 | Sandbox check used fragile string match | `"✅ Patch Verified" in result` could miss variants | Replaced with structured marker tuple |
+| Apr 22 | Repair pipeline could loop forever | `NEEDS_REVISION` returned same error indefinitely | `_PIPELINE_MAX_ATTEMPTS = 3` fingerprint guard |
+| Apr 22 | `RuntimeWarning: coroutine never awaited` in tests | `AsyncMock.add()` returned coroutine for synchronous SQLAlchemy method | `mock_session.add = MagicMock()` in all 4 test cases |
+| Apr 23 | Verification ran ruff on `SKILL.md` and on the runtime container (no ruff installed) | Programmer agent hard-coded `python -m ruff check`; engine allowlist had only Python tools | New `src/repair/verify_file.py` (file-type aware, stdlib + pyyaml only); `RepairAgent.refine_pending_verification` tool to swap commands without re-proposing the patch; engine flags `failure_kind: missing_tool` so the agent branches correctly |
 
 ## Key Documents to Read
 
@@ -107,6 +113,7 @@
 |-----------|-------------|--------|
 | **M3 Explainable Observability** | `AgentTrace` table, trace persistence in orchestrator, `GET /api/traces`, Dashboard Timeline drawer | ✅ Complete |
 | **M4 Self-Healing Loop** | `classify_repair_risk()`, `propose_low_risk_fix` auto-apply, `verifier.py`, `risk_level`/`auto_applied` on RepairTicket, Repairs tab | ✅ Complete |
+| **M4+ Repair Hardening** | Proactive Telegram push on error, email alerts, inline "Apply fix now?" keyboard, `/tickets` + `/ticket` commands, max_retries guard | ✅ Complete |
 | **M1 Parallel Fan-Out** | `parallel_runner.py` asyncio.gather (max 3 branches, budget guard), `detect_parallel_domains()`, orchestrator pre-flight | ✅ Complete |
 | **M2 Background Jobs** | `background_job.py`, `BackgroundJob` model, orchestrator monitor-phrase detection, Jobs Dashboard tab | ✅ Complete |
 | **Repo Cleanup** | 4 backup dirs deleted, `.gitignore`/`.dockerignore` hardened, Dockerfile alembic fix, compose bind-mount removed | ✅ Complete |
@@ -115,6 +122,8 @@ New files added:
 - `src/agents/parallel_runner.py` — asyncio fan-out runner
 - `src/agents/background_job.py` — autonomous background job lifecycle
 - `src/repair/verifier.py` — post-apply smoke test + rollback
+- `src/bot/notifications.py` — Telegram push helpers (error alert, ticket created, fix-ready inline keyboard, low-risk applied)
+- `src/repair/notifications.py` — email helpers via connected Gmail (ticket created, fix ready)
 - `alembic/versions/006_agentic_upgrade.py` — migration for agent_traces, background_jobs, repair_tickets columns
 - `.dockerignore` — lean Docker build context
 
@@ -161,6 +170,34 @@ See `docs/ADR-2026-03-21-persona-interview-onboarding.md` for full design ration
 
 **Credential management via Telegram:** `/tools credentials set <tool> <key> <value>` — no .env editing needed.
 
+## Dashboard Enhancement Phases (Complete — April 23, 2026)
+
+**Goal:** Full-featured Dashboard UI with tool wizard, cost visibility, selective deletion, manual tickets, interactions drill-down, and customizable grid layout.
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| **1 — Tool Wizard** | AI-guided tool creation dialog (interview → generate → review → save) | ✅ Complete |
+| **2a — Cost Visibility** | Raised log level; expanded pricing table for GPT-5.4, Claude Opus 4, OpenRouter | ✅ Complete |
+| **2b — Shared Cost Helper** | `record_llm_cost()` in `src/models/cost_tracker.py`; unified pricing table | ✅ Complete |
+| **3 — Duplicate Detection** | Fuzzy-match agents/tools/skills (≥ 85%) in `setup_org_project`; reuse existing | ✅ Complete |
+| **4 — Selective Org Deletion** | Preview dialog, holding org (`__retained__`), retain checkboxes | ✅ Complete |
+| **5 — Manual Tickets** | `NewTicketDialog` in Repairs tab (AI Agent or Admin pipeline) | ✅ Complete |
+| **6 — Interactions Drill-Down** | Clickable Interactions tile → drawer with audit-log rows + filters | ✅ Complete |
+| **7 — Tasks vs Jobs** | Tooltips + README_ORCHESTRATION section clarifying distinction | ✅ Complete |
+| **8 — Draggable Grid** | react-grid-layout OverviewTab; 6 tiles; Redis layout persistence | ✅ Complete |
+
+New API endpoints:
+- `GET /api/orgs/{id}/delete-preview` — preview before deletion
+- `DELETE /api/orgs/{id}` — selective delete with retain body
+- `GET/PUT /api/dashboard/layout` — grid layout persistence
+- `POST /api/repairs` — manual ticket creation
+- `GET /api/activity` — audit-log rows with filters
+- `POST /api/tools/wizard/generate` — AI tool wizard
+
+New files:
+- `src/models/cost_tracker.py` — `OPENAI_MODEL_PRICING` table + `record_llm_cost()` helper
+- `tests/test_cost_tracker_helper.py` — unit tests for cost helper
+
 ## Pending / Future Work
 
 - **Background job `reinject_schedule` action** — partially implemented, needs APScheduler hook
@@ -171,6 +208,8 @@ See `docs/ADR-2026-03-21-persona-interview-onboarding.md` for full design ration
 - **Multi-user support** — requires full tenancy redesign
 - **Parallel runner unit tests** — `test_parallel_runner.py` and `test_background_job.py` not yet written
 - **Background job cancel via Telegram `/cancel`** — route `/cancel` to background_job cancel by ID
+- **Repair pipeline retry counter persistence** — `_PIPELINE_ATTEMPT_COUNTS` is in-memory; resets on container restart. Could persist to Redis for durability across restarts.
+- **Repair email delivery fallback** — if Gmail MCP is disconnected, fix-ready email silently fails (logged only). Could add SMTP fallback.
 
 ## Environment Requirements
 

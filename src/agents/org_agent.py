@@ -22,6 +22,7 @@ from sqlalchemy import select, update, func as sa_func
 from sqlalchemy.orm import selectinload
 
 from src.db.session import async_session
+from src.db.models import User
 from src.orchestration.agent_registry import (
     Organization,
     OrgAgent,
@@ -103,10 +104,267 @@ def _agent_display(agents_by_id: dict[int, OrgAgent], agent_id: int | None) -> s
     return ""
 
 
+async def _resolve_db_user_id(session, telegram_id: int) -> int | None:
+    """Resolve a Telegram user ID to the internal users.id (32-bit PK).
+
+    organizations.owner_user_id is a FK to users.id — passing the raw
+    Telegram ID (which can exceed INT32_MAX) causes a DB overflow error.
+    """
+    row = await session.execute(
+        select(User.id).where(User.telegram_id == telegram_id)
+    )
+    return row.scalar_one_or_none()
+
+
+# ── Skill file generation (Fix C) ────────────────────────────────────────
+
+_RESERVED_SKILL_IDS: frozenset[str] = frozenset({
+    "memory", "scheduler", "organizations",
+    "openrouter_images",
+    "gmail", "calendar", "google_tasks", "drive",
+    "google_sheets", "google_docs", "google_slides", "google_contacts",
+})
+
+
+def _slugify_skill_id(raw: str) -> str:
+    """Normalize a free-form skill name into a filesystem-safe slug."""
+    import re
+    s = (raw or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = s.strip("-")
+    return s or "skill"
+
+
+# ── Duplicate-check reuse helpers (Phase 3) ────────────────────────────
+# When setup_org_project receives an LLM plan, we don't blindly create every
+# agent/tool/skill. Instead we fuzzy-match against existing items owned by the
+# same user and, when similarity >= REUSE_THRESHOLD, REUSE the existing item
+# and record the decision in the summary so the user sees exactly what
+# happened. This protects "reusable general" items (e.g. a generic "Email
+# Agent") from being duplicated each time a new project is spun up, while
+# still allowing specialized items to be freshly created.
+
+REUSE_THRESHOLD: float = 0.85
+
+
+def _similar(a: str, b: str) -> float:
+    """Fast string-similarity ratio in [0, 1]. Case-insensitive, punctuation-tolerant."""
+    from difflib import SequenceMatcher
+    if not a or not b:
+        return 0.0
+    sa = a.strip().lower()
+    sb = b.strip().lower()
+    if not sa or not sb:
+        return 0.0
+    if sa == sb:
+        return 1.0
+    return SequenceMatcher(None, sa, sb).ratio()
+
+
+async def _find_similar_existing_agent(
+    session: Any, owner_user_id: int, planned_name: str, planned_role: str | None
+) -> tuple[Optional["OrgAgent"], float]:
+    """Search all OrgAgents owned by ``owner_user_id`` across orgs for one whose
+    name closely matches ``planned_name``. Returns ``(agent, score)`` where
+    ``agent`` is None when nothing meets the threshold.
+    """
+    from sqlalchemy import select as _sel
+    q = (
+        _sel(OrgAgent)
+        .join(Organization, OrgAgent.org_id == Organization.id)
+        .where(Organization.owner_user_id == owner_user_id)
+    )
+    rows = (await session.execute(q)).scalars().all()
+    best: Optional["OrgAgent"] = None
+    best_score = 0.0
+    for row in rows:
+        score = _similar(row.name, planned_name)
+        # Role match is a small bonus: if planned role matches existing role,
+        # bump the score a little (capped at 1.0).
+        if planned_role and row.role and _similar(row.role, planned_role) > 0.8:
+            score = min(1.0, score + 0.05)
+        if score > best_score:
+            best = row
+            best_score = score
+    return (best, best_score)
+
+
+async def _find_similar_existing_tool(
+    session: Any, planned_name: str
+) -> tuple[Optional[Any], float]:
+    """Search active tools (global table) for one whose name closely matches."""
+    from sqlalchemy import select as _sel
+    from src.db.models import Tool as _Tool
+    rows = (await session.execute(_sel(_Tool).where(_Tool.is_active == True))).scalars().all()  # noqa: E712
+    best = None
+    best_score = 0.0
+    for row in rows:
+        score = _similar(row.name, planned_name)
+        if score > best_score:
+            best = row
+            best_score = score
+    return (best, best_score)
+
+
+def _find_similar_existing_skill(planned_slug: str, planned_name: str) -> tuple[Optional[str], float]:
+    """Scan ``src/user_skills/`` on disk for an existing skill directory whose
+    id (dir name) or SKILL.md name matches the planned skill. Returns the
+    matched skill id (directory name) and a similarity score.
+    """
+    from pathlib import Path as _P
+    root = _P("src/user_skills")
+    if not root.exists():
+        return (None, 0.0)
+    best_id: Optional[str] = None
+    best_score = 0.0
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        # Compare against directory slug (primary) and the SKILL.md name if present.
+        candidates = [child.name]
+        md = child / "SKILL.md"
+        if md.exists():
+            try:
+                head = md.read_text(encoding="utf-8", errors="ignore")[:400]
+                # crude: extract `name: "..."` from the frontmatter
+                import re as _re
+                m = _re.search(r'name:\s*"([^"]+)"', head)
+                if m:
+                    candidates.append(m.group(1))
+            except Exception:
+                pass
+        for cand in candidates:
+            for planned in (planned_slug, planned_name):
+                score = _similar(cand, planned)
+                if score > best_score:
+                    best_id = child.name
+                    best_score = score
+    return (best_id, best_score)
+
+
+def _write_skill_md(
+    skill_id: str,
+    name: str,
+    description: str,
+    tags: list[str],
+    routing_hints: list[str],
+    instructions: str,
+    related_tools: list[str],
+    org_name: str,
+) -> tuple[bool, str]:
+    """Write an auto-generated SKILL.md file under src/user_skills/<skill_id>/.
+
+    Returns (created, message). If the skill already exists on disk, the file
+    is NOT overwritten (reversible by design — the user can edit/delete from
+    the dashboard).
+    """
+    from pathlib import Path as _P
+
+    skill_dir = _P(f"src/user_skills/{skill_id}")
+    if skill_dir.exists():
+        return (False, f"skill '{skill_id}' already exists")
+
+    try:
+        skill_dir.mkdir(parents=True, exist_ok=False)
+    except Exception as e:
+        return (False, f"failed to create skill dir: {e}")
+
+    # Build YAML frontmatter by hand (no pyyaml dep). One list item per line.
+    def _yaml_list(items: list[str], indent: str = "  ") -> str:
+        if not items:
+            return "[]"
+        lines = [""]
+        for item in items:
+            # Escape double quotes in the string
+            escaped = str(item).replace('"', '\\"').strip()
+            lines.append(f'{indent}- "{escaped}"')
+        return "\n".join(lines)
+
+    # Description must fit on one line for simple YAML parser.
+    safe_desc = description.replace("\n", " ").replace('"', '\\"').strip()
+    safe_name = name.replace('"', '\\"').strip()
+
+    frontmatter = (
+        "---\n"
+        f'name: "{safe_name}"\n'
+        f'description: "{safe_desc}"\n'
+        "version: 1.0.0\n"
+        "author: atlas-setup\n"
+        f'group: "user"\n'
+        f"tags: {_yaml_list(tags)}\n"
+        f"routing_hints: {_yaml_list(routing_hints)}\n"
+        "requires_skills: []\n"
+        "extends_skill: null\n"
+        "tools: []\n"
+        "requires_connection: false\n"
+        "read_only: true\n"
+        "---\n"
+    )
+
+    # Instructions body. If the planner didn't supply a rich body, generate
+    # a structured default that references the org's tools so the orchestrator
+    # knows which CLI tools to call when this skill is matched.
+    body_parts: list[str] = []
+    if instructions and instructions.strip():
+        body_parts.append(instructions.strip())
+    else:
+        body_parts.append(f"## Purpose\n\n{safe_desc}")
+
+    if related_tools:
+        tool_lines = "\n".join(f"- `{t}`" for t in related_tools)
+        body_parts.append(
+            "## Available Tools\n\n"
+            f"When this skill is active, prefer calling these registered tools "
+            f"from the **{org_name}** organization before falling back to "
+            "external search or generic reasoning:\n\n"
+            f"{tool_lines}"
+        )
+
+    body_parts.append(
+        "## Routing Hints\n\n"
+        "This skill is selected when the user mentions any of: "
+        + ", ".join(f"`{h}`" for h in routing_hints[:6] or [safe_name])
+        + ". When selected, follow the instructions above and call the listed "
+        "tools with the parameters declared in each tool's manifest."
+    )
+
+    body = "\n\n".join(body_parts) + "\n"
+
+    try:
+        (skill_dir / "SKILL.md").write_text(frontmatter + "\n" + body, encoding="utf-8")
+        return (True, f"skill '{skill_id}' written to {skill_dir}")
+    except Exception as e:
+        # Cleanup partial dir on write failure
+        try:
+            import shutil as _sh
+            _sh.rmtree(skill_dir, ignore_errors=True)
+        except Exception:
+            pass
+        return (False, f"failed to write SKILL.md: {e}")
+
+
 # ── Bound tool builders ──────────────────────────────────────────────────
 
 def _build_bound_org_tools(user_id: int) -> list:
-    """Build organization management tools bound to a specific user."""
+    """Build organization management tools bound to a specific user.
+
+    Args:
+        user_id: The Telegram user ID (BigInteger). Tools resolve
+            this to the internal users.id (32-bit PK) on first DB write.
+    """
+    # Alias used by inner functions for DB resolution
+    user_telegram_id = user_id
+
+    async def _get_db_owner_id(session) -> int:
+        """Resolve telegram_id → users.id.
+
+        Falls back to ``user_telegram_id`` itself when resolution returns None
+        so that unit-test mocks (which don't seed a users table) continue to
+        work.  In production this code path never returns None because the
+        bot creates the user row on /start before any org operation.
+        """
+        db_id = await _resolve_db_user_id(session, user_telegram_id)
+        return db_id if db_id is not None else user_telegram_id
 
     # ── CRUD: Organizations ──────────────────────────────────────────
 
@@ -118,10 +376,11 @@ def _build_bound_org_tools(user_id: int) -> list:
     async def list_organizations() -> str:
         """List all organizations you own, with agent and task counts."""
         async with async_session() as session:
+            db_owner_id = await _get_db_owner_id(session)
             orgs = (
                 await session.execute(
                     select(Organization)
-                    .where(Organization.owner_user_id == user_id)
+                    .where(Organization.owner_user_id == db_owner_id)
                     .where(Organization.status == "active")
                     .order_by(Organization.created_at.desc())
                 )
@@ -182,7 +441,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             return "Provide part of the organization name so I can find the correct org ID."
 
         async with async_session() as session:
-            matches = await _find_owned_orgs_by_name(session, user_id, name_query)
+            db_owner_id = await _get_db_owner_id(session)
+            matches = await _find_owned_orgs_by_name(session, db_owner_id, name_query)
 
         if not matches:
             return (
@@ -226,11 +486,12 @@ def _build_bound_org_tools(user_id: int) -> list:
             return "Organization goal cannot be empty."
 
         async with async_session() as session:
+            db_owner_id = await _get_db_owner_id(session)
             org = Organization(
                 name=name.strip(),
                 description=description,
                 goal=goal.strip(),
-                owner_user_id=user_id,
+                owner_user_id=db_owner_id,
                 status="active",
             )
             session.add(org)
@@ -271,7 +532,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             return "Status must be 'active', 'paused', or 'archived'."
 
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -311,7 +573,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             org_id: The organization ID to inspect
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -394,7 +657,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             allowed_tools: Comma-separated tool names this agent may call (e.g., 'browser_scrape_page,linkedin_scrape_page')
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -456,7 +720,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             priority = "medium"
 
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -514,7 +779,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             agent_id: Agent ID to assign the task to
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -554,7 +820,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             task_id: Task ID to complete
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -592,7 +859,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             status_filter: Optional filter: 'pending', 'in_progress', 'completed', or None for all
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -666,7 +934,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             return "schedule_type must be 'cron', 'interval', or 'once'."
 
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -707,7 +976,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             org_id: Organization ID
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -748,7 +1018,8 @@ def _build_bound_org_tools(user_id: int) -> list:
             job_id: The APScheduler job ID to cancel (shown by list_org_schedules)
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -781,6 +1052,7 @@ def _build_bound_org_tools(user_id: int) -> list:
         tool_code: str,
         requires_network: bool = False,
         allowed_hosts: str = "",
+        requires_system_binary: bool = False,
     ) -> str:
         """Create a new CLI tool scoped to an organization.
 
@@ -795,9 +1067,11 @@ def _build_bound_org_tools(user_id: int) -> list:
             requires_network: Whether the tool needs internet access
             allowed_hosts: Comma-separated allowed hostnames if network required
             org_id: Organization ID to scope the tool to
+            requires_system_binary: Set True for tools that invoke system binaries (ffmpeg, convert, sox, etc.) via subprocess
         """
         async with async_session() as session:
-            org = await _get_owned_org(session, org_id, user_id)
+            db_owner_id = await _get_db_owner_id(session)
+            org = await _get_owned_org(session, org_id, db_owner_id)
             if not org:
                 return f"Organization {org_id} not found or you don't own it."
 
@@ -810,6 +1084,7 @@ def _build_bound_org_tools(user_id: int) -> list:
             tool_code=tool_code,
             requires_network=requires_network,
             allowed_hosts=allowed_hosts,
+            requires_system_binary=requires_system_binary,
         )
 
         if "created and registered" in result.lower() or "✅" in result:
@@ -859,52 +1134,203 @@ def _build_bound_org_tools(user_id: int) -> list:
 
         client = AsyncOpenAI()
 
-        # ── Step 1: Ask the LLM to produce a structured plan ──────────
-        planning_prompt = f"""You are a project planner for an AI personal assistant system called Atlas.
+        # ── Step 1: Ask the LLM to produce a structured plan ────────────
+        planning_prompt = f"""You are a senior AI systems architect designing a multi-agent project for
+Atlas — a self-hosted personal assistant powered by OpenAI Agents SDK.
+
 The user wants to achieve the following goal:
 
   GOAL: {goal}
 
-Produce a JSON execution plan with this exact structure (no markdown fences, raw JSON only):
+Produce a JSON execution plan with this EXACT structure (raw JSON only, no markdown fences):
 {{
-  "org_name": "<short descriptive project name, e.g. 'Atlas Code Audit'>",
-  "org_goal": "<one-sentence mission statement>",
+  "org_name": "<short descriptive project name, 2-5 words>",
+  "org_goal": "<one-sentence mission statement that defines success>",
   "agents": [
     {{
-      "name": "<agent name>",
-      "role": "<role slug, e.g. 'auditor', 'reporter', 'monitor'>",
-      "description": "<what this agent does>",
-      "instructions": "<specific behaviour instructions for this agent>",
-      "skills": ["<skill_id>", ...],
-      "allowed_tools": ["<tool_name>", ...]
+      "name": "<agent name, 2-3 words max>",
+      "role": "<role slug: 'orchestrator'|'executor'|'reviewer'|'specialist'>",
+      "description": "<one sentence — what this agent is responsible for>",
+      "instructions": "<DETAILED multi-paragraph instructions — see requirements below>",
+      "skills": ["<skill_id — see rules below>", ...],
+      "allowed_tools": ["<tool_name_snake_case from the tools list>", ...]
     }}
   ],
   "tasks": [
     {{
       "title": "<task title>",
-      "description": "<task details>",
+      "description": "<2-3 sentence description including inputs, process, and expected output>",
       "priority": "high|medium|low",
-      "agent_name": "<name of agent from the agents list above who owns this task>"
+      "agent_name": "<exact name of agent from the agents list who owns this task>"
+    }}
+  ],
+  "tools": [
+    {{
+      "name": "<snake_case_tool_name>",
+      "description": "<what this tool does in one sentence>",
+      "tool_type": "cli | http_api",
+      "parameters": {{
+        "<param_name>": {{"type": "str|int|bool", "required": true, "description": "<param description>"}}
+      }},
+      "requires_network": false,
+      "requires_system_binary": false,
+      "allowed_hosts": "<comma-separated hostnames if http_api, e.g. openrouter.ai>",
+      "credential_keys": "<comma-separated credential names if http_api, e.g. api_key>",
+      "tool_code": "<complete Python script — see code rules below for the correct pattern per tool_type>"
+    }}
+  ],
+  "skills": [
+    {{
+      "id": "<kebab-case-skill-id>",
+      "name": "<Human Readable Skill Name>",
+      "description": "<one-sentence summary>",
+      "tags": ["<single-word keyword>", ...],
+      "routing_hints": ["<natural phrase user would say>", ...],
+      "instructions": "<detailed markdown — see skill instruction requirements below>",
+      "related_tools": ["<tool_name from tools list>", ...]
     }}
   ]
 }}
 
-Rules:
-- Include 2–5 agents maximum.  Keep the team small and focused.
-- Include 4–10 tasks that cover the full workflow from start to finish.
-- Skills must come from this list only: code_audit, scheduler_diagnostics,
-  memory_review, tool_registry_check, api_health, log_analysis, self_improvement.
-- Allowed tools must come from this list only: get_my_recent_context,
-  summarize_my_conversation, list_tools, run_code_audit, check_scheduler_health,
-  list_schedules, get_org_status.
-- Each task MUST reference an agent_name that exists in the agents list.
-- Respond with raw JSON only — no explanation, no markdown.
+═══════════════════════════════════════════════════════════════
+AGENT INSTRUCTION REQUIREMENTS (most important section)
+═══════════════════════════════════════════════════════════════
+Each agent's "instructions" field MUST be a detailed, multi-paragraph string (300-600 words)
+that contains ALL of the following sections:
+
+## Role & Purpose
+State the agent's precise role within the team, what it is responsible for, and what it
+is NOT responsible for.
+
+## Workflow
+Numbered step-by-step workflow the agent follows for every request. Reference specific
+tool names. For example:
+  1. Receive task from user or ProjectManager agent
+  2. Call `ffmpeg_convert_video` with --input and --output params
+  3. Verify output file exists; if not, log error and retry once
+  4. Return structured result: {{status, output_path, duration_sec}}
+
+## Tool Usage
+For each tool in allowed_tools, one paragraph explaining exactly when and how to call it,
+what parameters are required, and how to handle its output or errors.
+
+## Cross-Agent Coordination
+How this agent communicates results to other agents or receives input from them.
+Specify the data contract (what fields are passed, what format).
+
+## Error Handling
+What to do when a tool fails: retry policy, fallback actions, when to escalate.
+
+## Output Format
+Exact format of responses this agent produces (JSON, markdown, plain text, etc.)
+and what fields/sections to always include.
+
+═══════════════════════════════════════════════════════════════
+SKILL INSTRUCTION REQUIREMENTS
+═══════════════════════════════════════════════════════════════
+Each skill's "instructions" MUST be 150-400 words of markdown covering:
+- ## Purpose: what this skill enables, domain context
+- ## When to Use: trigger phrases and conditions
+- ## Process: numbered steps an agent follows when this skill is active
+- ## Tools: which CLI tools to call and in what order
+- ## Examples: 2-3 example user requests and expected agent responses
+
+Skills are the routing layer — well-written instructions ensure Atlas correctly
+activates this skill and executes the right tool sequence.
+
+═══════════════════════════════════════════════════════════════
+ATLAS BUILT-IN CAPABILITIES (use these instead of generating new tools)
+═══════════════════════════════════════════════════════════════
+Atlas already has the following built-in skills and tools. Reference them in agent
+skills and instructions INSTEAD of generating duplicate CLI tools.
+
+OPENROUTER SKILL (id: "openrouter_images") — USE THIS for ALL AI-native media generation:
+  Provides 3 tools agents can call:
+    • generate_image(prompt, quality)         — text-to-image via OpenRouter
+    • analyze_uploaded_image(prompt)          — analyze a Telegram photo
+    • list_openrouter_models(modality)        — discover cheapest model for "image"|"video"|"audio"
+
+  WHEN TO USE openrouter_images skill:
+    ✅ Talking avatar / lip-sync ("make this image talk", "have photo say", "animate my face")
+    ✅ AI video generation ("create a video from a description", "text to video", "image to video")
+    ✅ Music / audio generation ("create background music", "generate a song", "make a jingle")
+    ✅ Image generation from a prompt ("create an image of...", "generate artwork")
+    ✅ Any request that needs an AI model to CREATE media, not just process existing files
+
+  HOW AGENTS SHOULD USE IT:
+    For talking-head / lip-sync video:
+      1. Call list_openrouter_models(modality="video") to find cheapest lip-sync model
+      2. The result shows model IDs and pricing — pick lowest cost model that supports lip-sync
+         (known good models: alibaba/wan-2.6 for portrait lip-sync, bytedance/seedance-1-5-pro for multi-language)
+      3. Explain to user which model was chosen and ~cost, then confirm the avatar photo is ready
+      4. Submit to OpenRouter POST /api/v1/videos — async job, polls 15s intervals, result is mp4
+
+    For AI music / audio:
+      1. Call list_openrouter_models(modality="audio") to find cheapest model
+      2. Submit the generation request with the chosen model
+
+  To assign this skill to an agent, add "openrouter_images" to the agent's skills array.
+  ⚠️ Do NOT generate CLI tools for TTS, lip-sync, image generation, video AI, or music — use openrouter_images instead.
+
+FFMPEG SKILL (tools already exist: ffmpeg_video_composition, ffmpeg_apply_transitions, ffmpeg_aspect_ratio,
+  ffmpeg_audio_normalization, ffmpeg_audio_integration) — USE FOR file processing only:
+    ✅ Compositing existing video clips together
+    ✅ Applying transitions between clips
+    ✅ Adjusting aspect ratio / resolution of existing files
+    ✅ Normalizing audio levels on existing audio files
+    ✅ Adding a pre-existing audio track to a pre-existing video
+    ❌ NOT for generating new content from scratch — use openrouter_images for that
+
+═══════════════════════════════════════════════════════════════
+DECISION TREE: CLI tool vs built-in skill
+═══════════════════════════════════════════════════════════════
+Ask: "Does this task need an AI model to CREATE new content, or process existing files?"
+  → CREATE new content (TTS, video gen, lip-sync, music, image gen) → use openrouter_images skill
+  → PROCESS existing files (cut, join, encode, resize, normalize) → use FFmpeg tools
+  → FETCH data from the web / APIs → generate a CLI tool with requires_network=true
+  → NO external binary or network needed → leave tools:[] and handle via LLM reasoning
+
+═══════════════════════════════════════════════════════════════
+GENERAL RULES
+═══════════════════════════════════════════════════════════════
+- Include 2-4 agents maximum. One should be a ProjectManager/Orchestrator.
+- Include 4-10 tasks covering the full workflow end-to-end.
+- Generate 1-3 DOMAIN SKILLS. Each MUST have:
+  * 5-8 routing_hints covering BOTH file-processing AND AI-generation phrasings the user might say
+  * 4-8 single-word tags including "video", "audio", "generate", "ai" if relevant
+  * related_tools matching names in the tools array (leave empty if using only built-in skills)
+- For agent skills, use ONLY:
+  * Reserved IDs: memory | scheduler | organizations | openrouter_images
+  * Or the exact kebab-case id of a skill defined in the skills array
+- For allowed_tools, reference ONLY tool names defined in the tools array.
+  (openrouter_images tools are accessed via the skill, not via allowed_tools)
+- IMPORTANT: If the goal needs external programs (ffmpeg, sox, yt-dlp, imagemagick, etc.)
+  for FILE PROCESSING, generate working CLI tools with requires_system_binary=true.
+  Use subprocess.run(["ffmpeg", ...], capture_output=True, text=True, check=False) — never shell=True.
+
+CLI TOOL CODE RULES (follow exactly):
+  import argparse, subprocess, sys
+  def main():
+      parser = argparse.ArgumentParser(...)
+      parser.add_argument("--param", required=True, help="...")
+      args = parser.parse_args()   # MUST be before any subprocess call
+      cmd = ["binary", "--flag", args.param]   # always a LIST
+      result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+      if result.returncode != 0:
+          print(result.stderr, file=sys.stderr); sys.exit(result.returncode)
+      print(result.stdout or "Done.")
+  if __name__ == "__main__": main()
+  * NEVER: shell=True, os.system, eval, exec, os.environ, shutil, ctypes, pickle
+
+- Leave tools as [] if no external binaries are needed.
+- Each task agent_name MUST exactly match an agent name in the agents list.
+- Respond with raw JSON only — no explanation, no markdown fences.
 """
         try:
             response = await client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4o",
                 messages=[{"role": "user", "content": planning_prompt}],
-                temperature=0.2,
+                temperature=0.3,
                 response_format={"type": "json_object"},
             )
             raw = response.choices[0].message.content or "{}"
@@ -918,6 +1344,8 @@ Rules:
 
         planned_agents: list[dict] = plan.get("agents") or []
         planned_tasks: list[dict] = plan.get("tasks") or []
+        planned_tools: list[dict] = plan.get("tools") or []
+        planned_skills: list[dict] = plan.get("skills") or []
         resolved_org_name = org_name or plan.get("org_name") or "New Project"
         resolved_org_goal = plan.get("org_goal") or goal
 
@@ -926,8 +1354,9 @@ Rules:
 
         # ── Step 2: Create or reuse the organization ───────────────────
         async with async_session() as session:
+            db_owner_id = await _get_db_owner_id(session)
             if org_id:
-                org = await _get_owned_org(session, org_id, user_id)
+                org = await _get_owned_org(session, org_id, db_owner_id)
                 if not org:
                     return f"Organization {org_id} not found or you don't own it."
                 created_org = False
@@ -935,7 +1364,7 @@ Rules:
                 org = Organization(
                     name=resolved_org_name,
                     goal=resolved_org_goal,
-                    owner_user_id=user_id,
+                    owner_user_id=db_owner_id,
                     status="active",
                 )
                 session.add(org)
@@ -946,18 +1375,82 @@ Rules:
                 )
                 created_org = True
 
-            # ── Step 3: Create agents ──────────────────────────────────
+            # ── Step 3: Create (or reuse) agents ───────────────────────
+            # Phase 3: fuzzy-match the planned agent name against this user's
+            # existing agents. If similarity >= REUSE_THRESHOLD, clone the
+            # existing config into the new org (we do NOT re-parent the row —
+            # each OrgAgent row stays owned by its original org so the cascade
+            # on org-delete behaves predictably). The cloned row records its
+            # source via `tools_config["cloned_from_agent_id"]`.
             agent_name_to_obj: dict[str, OrgAgent] = {}
+            agent_reuse_notes: list[tuple[str, str, float]] = []  # (planned_name, existing_name, score)
             for ap in planned_agents:
+                planned_agent_name = ap.get("name", "Agent").strip()
+                planned_agent_role = (ap.get("role") or "specialist").strip()
+
                 tc: dict = {}
                 if ap.get("skills"):
-                    tc["skills"] = [s.strip() for s in ap["skills"] if s.strip()]
+                    # Slugify so IDs match what _write_skill_md creates on disk
+                    tc["skills"] = [
+                        _slugify_skill_id(s) for s in ap["skills"]
+                        if s.strip() and s.strip() not in _RESERVED_SKILL_IDS
+                    ] + [
+                        s.strip() for s in ap["skills"]
+                        if s.strip() in _RESERVED_SKILL_IDS
+                    ]
                 if ap.get("allowed_tools"):
                     tc["allowed_tools"] = [t.strip() for t in ap["allowed_tools"] if t.strip()]
+
+                # Look for a reusable existing agent owned by this user.
+                existing_agent, score = await _find_similar_existing_agent(
+                    session, db_owner_id, planned_agent_name, planned_agent_role,
+                )
+                if existing_agent is not None and score >= REUSE_THRESHOLD:
+                    # Clone config into a new row scoped to this org; carry over
+                    # skills/tools from the source, overlaying the planner's
+                    # extras so specialization still works.
+                    src_cfg = dict(existing_agent.tools_config or {})
+                    src_skills = list(src_cfg.get("skills") or [])
+                    src_tools = list(src_cfg.get("allowed_tools") or [])
+                    new_skills = sorted(set(
+                        _slugify_skill_id(s) if s not in _RESERVED_SKILL_IDS else s
+                        for s in (src_skills + (tc.get("skills") or []))
+                    ))
+                    new_tools = sorted(set(src_tools) | set(tc.get("allowed_tools") or []))
+                    merged_tc: dict = {}
+                    if new_skills:
+                        merged_tc["skills"] = new_skills
+                    if new_tools:
+                        merged_tc["allowed_tools"] = new_tools
+                    merged_tc["cloned_from_agent_id"] = existing_agent.id
+                    merged_tc["cloned_from_name"] = existing_agent.name
+                    merged_tc["reuse_similarity"] = round(score, 3)
+
+                    db_agent = OrgAgent(
+                        org_id=org.id,
+                        name=existing_agent.name,  # keep the canonical name
+                        role=existing_agent.role or planned_agent_role,
+                        description=existing_agent.description or ap.get("description"),
+                        instructions=existing_agent.instructions or ap.get("instructions"),
+                        tools_config=merged_tc,
+                        status="active",
+                    )
+                    session.add(db_agent)
+                    await session.flush()
+                    await _log_activity(
+                        session, org.id, "agent_cloned",
+                        f"Agent '{db_agent.name}' cloned from existing agent #{existing_agent.id} "
+                        f"(similarity {score:.2f} vs planned '{planned_agent_name}')",
+                        agent_id=db_agent.id,
+                    )
+                    agent_name_to_obj[db_agent.name] = db_agent
+                    agent_reuse_notes.append((planned_agent_name, existing_agent.name, score))
+                    continue
+
                 db_agent = OrgAgent(
                     org_id=org.id,
-                    name=ap.get("name", "Agent").strip(),
-                    role=ap.get("role", "specialist").strip(),
+                    name=planned_agent_name,
+                    role=planned_agent_role,
                     description=ap.get("description"),
                     instructions=ap.get("instructions"),
                     tools_config=tc if tc else None,
@@ -1003,11 +1496,161 @@ Rules:
             final_org_id = org.id
             final_org_name = org.name
 
+        # ── Step 4.5: Generate (or reuse) tools defined in the plan ────
+        # Routes to the correct generator based on tool_type:
+        #   "http_api"  → _generate_http_tool_impl (function type, httpx, credential vault)
+        #   "cli" / ""  → _generate_cli_tool_impl  (subprocess, argparse, system binary)
+        from src.agents.tool_factory_agent import _generate_cli_tool_impl, _generate_http_tool_impl
+        import json as _json
+        created_tool_results: list[tuple[str, str]] = []
+        tool_reuse_notes: list[tuple[str, str, float]] = []  # (planned_name, existing_name, score)
+        for tp in planned_tools:
+            tool_name = (tp.get("name") or "").strip().lower().replace(" ", "_")
+            tool_desc = tp.get("description") or ""
+            tool_code = tp.get("tool_code") or ""
+            tool_params = tp.get("parameters") or {}
+            tool_type = (tp.get("tool_type") or "cli").strip().lower()
+            requires_net = bool(tp.get("requires_network", False))
+            requires_bin = bool(tp.get("requires_system_binary", False))
+            allowed_hosts = (tp.get("allowed_hosts") or "").strip()
+            credential_keys = (tp.get("credential_keys") or "").strip()
+            if not tool_name or not tool_code:
+                continue
+
+            # Reuse existing tool if a close match is already registered.
+            async with async_session() as _ts:
+                existing_tool, tscore = await _find_similar_existing_tool(_ts, tool_name)
+            if existing_tool is not None and tscore >= REUSE_THRESHOLD:
+                tool_reuse_notes.append((tool_name, existing_tool.name, tscore))
+                created_tool_results.append(
+                    (tool_name, f"🔁 Reused existing tool '{existing_tool.name}' (similarity {tscore:.2f})")
+                )
+                async with async_session() as s:
+                    await _log_activity(
+                        s, final_org_id, "tool_reused",
+                        f"Tool '{existing_tool.name}' reused (planned '{tool_name}', similarity {tscore:.2f})",
+                    )
+                    await s.commit()
+                continue
+
+            try:
+                params_json_str = _json.dumps(tool_params)
+            except Exception:
+                params_json_str = "{}"
+
+            if tool_type == "http_api":
+                result = await _generate_http_tool_impl(
+                    name=tool_name,
+                    description=f"[{final_org_name}] {tool_desc}",
+                    parameters_json=params_json_str,
+                    tool_code=tool_code,
+                    allowed_hosts=allowed_hosts,
+                    credential_keys=credential_keys,
+                )
+                tool_kind = "HTTP API tool"
+            else:
+                result = await _generate_cli_tool_impl(
+                    name=tool_name,
+                    description=f"[{final_org_name}] {tool_desc}",
+                    parameters_json=params_json_str,
+                    tool_code=tool_code,
+                    requires_network=requires_net,
+                    allowed_hosts=allowed_hosts,
+                    requires_system_binary=requires_bin,
+                )
+                tool_kind = "CLI tool"
+
+            created_tool_results.append((tool_name, result))
+            if "✅" in result or "created and registered" in result.lower():
+                async with async_session() as s:
+                    await _log_activity(
+                        s, final_org_id, "tool_created",
+                        f"{tool_kind} '{tool_name}' auto-generated by project setup",
+                    )
+                    await s.commit()
+
+        # ── Step 4.6: Generate SKILL.md files for domain skills ───────
+        # Each planned skill becomes a filesystem SKILL.md under src/user_skills/
+        # so the orchestrator's selective skill router can match it against
+        # future user messages via routing_hints + tags.
+        created_skill_results: list[tuple[str, str, bool]] = []  # (id, message, created)
+        skills_actually_written = False
+        for sp in planned_skills:
+            raw_id = (sp.get("id") or sp.get("name") or "").strip()
+            if not raw_id:
+                continue
+            sk_id = _slugify_skill_id(raw_id)
+            if sk_id in _RESERVED_SKILL_IDS:
+                # Skip — these are built-in Atlas skills, don't shadow them
+                created_skill_results.append(
+                    (sk_id, "reserved built-in id skipped", False)
+                )
+                continue
+
+            sk_name = (sp.get("name") or raw_id).strip()
+            sk_desc = (sp.get("description") or "").strip()
+            sk_tags = [str(t).strip() for t in (sp.get("tags") or []) if str(t).strip()]
+            sk_hints = [str(h).strip() for h in (sp.get("routing_hints") or []) if str(h).strip()]
+            sk_instructions = (sp.get("instructions") or "").strip()
+            sk_related = [
+                str(t).strip().lower().replace(" ", "_")
+                for t in (sp.get("related_tools") or [])
+                if str(t).strip()
+            ]
+
+            # Phase 3: if an on-disk skill closely matches the planned one,
+            # reuse it rather than creating a sibling with a near-duplicate id.
+            existing_sk_id, sk_score = _find_similar_existing_skill(sk_id, sk_name)
+            if existing_sk_id is not None and sk_score >= REUSE_THRESHOLD:
+                created_skill_results.append(
+                    (sk_id, f"🔁 reused existing skill '{existing_sk_id}' (similarity {sk_score:.2f})", False)
+                )
+                async with async_session() as s:
+                    await _log_activity(
+                        s, final_org_id, "skill_reused",
+                        f"Skill '{existing_sk_id}' reused (planned '{sk_id}', similarity {sk_score:.2f})",
+                    )
+                    await s.commit()
+                continue
+
+            created, msg = _write_skill_md(
+                skill_id=sk_id,
+                name=sk_name,
+                description=sk_desc,
+                tags=sk_tags,
+                routing_hints=sk_hints,
+                instructions=sk_instructions,
+                related_tools=sk_related,
+                org_name=final_org_name,
+            )
+            created_skill_results.append((sk_id, msg, created))
+            if created:
+                skills_actually_written = True
+                async with async_session() as s:
+                    await _log_activity(
+                        s, final_org_id, "skill_created",
+                        f"Skill '{sk_id}' auto-generated by project setup",
+                    )
+                    await s.commit()
+
+        # Invalidate the orchestrator's per-user skill registry cache so the
+        # freshly-written skills participate in routing on the very next turn.
+        if skills_actually_written:
+            try:
+                from src.agents.orchestrator import _registry_cache
+                _registry_cache.clear()
+                logger.info("Cleared orchestrator skill-registry cache after skill generation")
+            except Exception as _e:
+                logger.warning("Failed to clear orchestrator cache: %s", _e)
+
         # ── Step 5: Validate skills and tools exist (sandbox check) ───
         from pathlib import Path as _Path
         _tools_plugin_dir = _Path("src/tools/plugins")
+        _user_skills_dir = _Path("src/user_skills")
 
-        # Build live skill ID set from registry
+        # Build live skill ID set: built-ins + freshly-written user skills
+        # Seed with all reserved IDs so they always pass validation.
+        _known_skill_ids: set[str] = set(_RESERVED_SKILL_IDS)
         try:
             from src.skills.registry import SkillRegistry
             from src.skills.internal import (
@@ -1017,9 +1660,21 @@ Rules:
             _check_registry.register(build_memory_skill(user_id))
             _check_registry.register(build_organization_skill(user_id))
             _check_registry.register(build_scheduler_skill(user_id))
-            _known_skill_ids = set(_check_registry._skills.keys())
+            _known_skill_ids |= set(_check_registry._skills.keys())
         except Exception:
-            _known_skill_ids = set()
+            pass
+        # Accept any user_skills dir that was just written — includes
+        # skills generated in Step 4.6 of this very setup run.
+        if _user_skills_dir.exists():
+            _known_skill_ids |= {
+                p.name for p in _user_skills_dir.iterdir()
+                if p.is_dir() and (p / "SKILL.md").exists()
+            }
+        # Also add the slugs of skills we just wrote this run (avoids
+        # false-positive warnings when the filesystem hasn't flushed yet).
+        for _sk_id, _sk_msg, _was_created in created_skill_results:
+            if _was_created or "reused" in _sk_msg:
+                _known_skill_ids.add(_sk_id)
 
         # Build live tool name set from DB + plugin dir
         try:
@@ -1067,7 +1722,15 @@ Rules:
             tc = a.tools_config or {}
             skill_note = f" | skills: {', '.join(tc['skills'])}" if tc.get("skills") else ""
             tool_note = f" | tools: {', '.join(tc['allowed_tools'])}" if tc.get("allowed_tools") else ""
-            lines.append(f"  • **{a.name}** ({a.role}){skill_note}{tool_note}")
+            reuse_note = ""
+            if tc.get("cloned_from_agent_id"):
+                reuse_note = f"  ♻️ cloned from existing agent (similarity {tc.get('reuse_similarity', '?')})"
+            lines.append(f"  • **{a.name}** ({a.role}){skill_note}{tool_note}{reuse_note}")
+
+        if agent_reuse_notes:
+            lines.append("\n**Reused agents (similarity ≥ {:.0%}):**".format(REUSE_THRESHOLD))
+            for planned, existing, score in agent_reuse_notes:
+                lines.append(f"  🔁 planned `{planned}` → reused existing **{existing}** ({score:.2f})")
 
         lines.append(f"\n**Tasks ({len(created_tasks)}):**")
         for t in created_tasks:
@@ -1078,6 +1741,34 @@ Rules:
             owner = f" → {assigned.name}" if assigned else " (unassigned)"
             icon = {"high": "🔴", "medium": "🟡", "low": "🟢"}.get(t.priority, "⚪")
             lines.append(f"  {icon} {t.title}{owner}")
+
+        # ── Tool generation results ─────────────────────────────────────
+        if created_tool_results:
+            lines.append(f"\n**CLI Tools ({len(created_tool_results)}):**")
+            for tname, tresult in created_tool_results:
+                if "🔁" in tresult:
+                    icon = "🔁"
+                elif "✅" in tresult or "created and registered" in tresult.lower():
+                    icon = "✅"
+                else:
+                    icon = "❌"
+                lines.append(f"  {icon} `{tname}` — {tresult[:200] if icon != '✅' else 'registered'}")
+                if icon == "❌" and ("failed" in tresult.lower() or "error" in tresult.lower()):
+                    lines.append(f"     _{tresult[:200]}_")
+
+        # ── Skill generation results ────────────────────────────────────
+        if created_skill_results:
+            n_new = sum(1 for _, _, c in created_skill_results if c)
+            n_reused = sum(1 for _, m, _ in created_skill_results if "🔁" in m)
+            lines.append(f"\n**Skills ({n_new} new, {n_reused} reused):**")
+            for sk_id, sk_msg, was_created in created_skill_results:
+                if was_created:
+                    icon = "✅"
+                elif "🔁" in sk_msg:
+                    icon = "🔁"
+                else:
+                    icon = "⚠️"
+                lines.append(f"  {icon} `{sk_id}` — {sk_msg}")
 
         if validation_warnings:
             lines.append("\n⚠️ **Validation issues found** (project still created — fix these to make agents fully operational):")

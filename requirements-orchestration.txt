@@ -1,22 +1,29 @@
 # Requirements for Atlas Dashboard API
 # Core framework
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
-sqlalchemy==2.0.23
-alembic==1.13.1
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+sqlalchemy
+alembic
+
+# OpenAI Agents SDK (must match main requirements — MCPServerStreamableHttp added in 0.13+)
+openai-agents>=0.13.0
+openai
 
 # Database
-asyncpg==0.29.0
-psycopg2-binary==2.9.9
+asyncpg
+psycopg2-binary
 
 # Redis (async quality scores + health check)
-redis==5.0.1
+redis
 
 # Telegram (for sending test notifications)
-aiogram==3.15.0
+aiogram
+
+# Rate limiting
+slowapi>=0.1.9
 
 # Utilities
-python-multipart==0.0.6
+python-multipart>=0.0.9
 python-dotenv==1.0.0

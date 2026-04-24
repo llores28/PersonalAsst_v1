@@ -74,7 +74,9 @@ class TestCreateRepairAgent:
 
     def test_agent_has_tools(self):
         agent = create_repair_agent()
-        assert len(agent.tools) == 9
+        assert len(agent.tools) == 15
+        # Sanity: file-type-aware verification refinement tool is registered
+        assert any(getattr(t, "name", "") == "refine_pending_verification" for t in agent.tools)
 
     def test_agent_uses_router_model(self):
         agent = create_repair_agent()

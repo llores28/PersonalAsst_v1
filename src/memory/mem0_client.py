@@ -102,7 +102,7 @@ async def search_memories(query: str, user_id: str, limit: int = 10) -> list[dic
             try:
                 current_meta = hit.get("metadata") or {}
                 current_meta["access_count"] = current_meta.get("access_count", 0) + 1
-                mem.update(hit_id, metadata=current_meta)
+                mem.update(hit_id, hit.get("memory", ""), metadata=current_meta)
             except Exception:
                 pass  # non-critical — don't break search for tracking
     return hits

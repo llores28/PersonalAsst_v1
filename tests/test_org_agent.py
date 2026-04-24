@@ -541,8 +541,21 @@ class _mock_session:
             return_value=mock_session_factory,
         )
         self._patcher.start()
+
+        # Patch _resolve_db_user_id so _get_db_owner_id resolves without
+        # consuming an execute slot from the mock.
+        async def _mock_resolve(session, telegram_id):
+            return 42
+
+        self._resolve_patcher = patch(
+            "src.agents.org_agent._resolve_db_user_id",
+            side_effect=_mock_resolve,
+        )
+        self._resolve_patcher.start()
         return mock_session
 
     def __exit__(self, *args):
         if self._patcher:
             self._patcher.stop()
+        if hasattr(self, "_resolve_patcher") and self._resolve_patcher:
+            self._resolve_patcher.stop()

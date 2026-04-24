@@ -1,0 +1,58 @@
+capabilities:
+  generate_image:
+    preferred_models:
+      - google/gemini-2.5-flash-image
+      - google/gemini-3.1-flash-image-preview
+      - black-forest-labs/flux.2-flex
+    timeout_seconds: 60
+  analyze_image:
+    preferred_models:
+      - google/gemini-2.5-pro-preview
+      - anthropic/claude-3.5-sonnet
+      - openai/gpt-4o-mini
+    timeout_seconds: 45
+
+  # Video generation — image-to-video, text-to-video, talking-head/lip-sync.
+  # API: POST https://openrouter.ai/api/v1/videos (async polling, 202 → poll → download).
+  # Always call list_openrouter_models(modality="video") at runtime for current pricing.
+  generate_video:
+    api_endpoint: "https://openrouter.ai/api/v1/videos"
+    async_polling: true
+    poll_interval_seconds: 15
+    timeout_seconds: 300
+    # Known good models, in priority order for lip-sync / talking-head use cases:
+    preferred_models:
+      - alibaba/wan-2.6        # native lip-sync, up to 15s, 9:16 portrait, cheapest for quality
+      - bytedance/seedance-1-5-pro  # multi-language lip-sync, unified audio+video, 4-12s
+      - minimax/hailuo-2.3    # image-to-video, expressive character rendering
+      - kwaivgi/kling-video-o1  # cinematic, first/last frame control
+    # Supported request parameters:
+    request_params:
+      frame_images: "first_frame or last_frame — use for image-to-video / talking-head"
+      input_references: "style/content reference images — use for reference-to-video"
+      aspect_ratio: "9:16 (portrait/vertical, default for mobile), 16:9, 1:1"
+      resolution: "720p (default), 1080p"
+      duration: "4-12 seconds (model dependent)"
+      generate_audio: "true/false — some models generate audio natively"
+    notes: >
+      For talking-head / lip-sync: provide the avatar image as frame_images[first_frame]
+      and describe the speech in the prompt. alibaba/wan-2.6 has the best lip-sync quality.
+      The response returns {id, polling_url, status}. Poll GET polling_url until
+      status=completed, then download from unsigned_urls[0].
+
+  # Audio/music generation — text-to-music, sound effects, TTS.
+  # Always call list_openrouter_models(modality="audio") at runtime for current pricing.
+  generate_audio:
+    notes: >
+      Audio generation models vary in endpoint. Check model description from
+      list_openrouter_models(modality="audio") for the correct API endpoint.
+      Common pattern: POST /api/v1/audio/generations with {model, prompt, duration}.
+      Always select the cheapest model that meets the task (music vs TTS vs SFX).
+
+quality_tiers:
+  fast:
+    prefer_index: 2
+  balanced:
+    prefer_index: 0
+  best:
+    prefer_index: 1

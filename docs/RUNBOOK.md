@@ -157,6 +157,19 @@ If the bot gives generic errors or "No tool call found" 400 errors:
 2. Wildcard `*` is ignored for dashboard API CORS.
 3. If using multiple users or explicit request scoping, dashboard API accepts `X-Telegram-Id` header for org ownership resolution.
 
+### Dashboard Layout Not Saving
+
+1. Layout is stored in Redis at `dashboard_layout:{telegram_id}` with 1-year TTL.
+2. If Redis is flushed, layout resets to defaults — user can re-arrange and save.
+3. Check Redis key: `docker compose exec redis redis-cli KEYS "dashboard_layout:*"`
+4. The frontend debounces saves (1.2s delay) — rapid drag/resize may not persist if browser is closed immediately.
+
+### Org Deletion Issues
+
+1. **Preview before delete:** Use `GET /api/orgs/{id}/delete-preview` to see what will be removed.
+2. **Selective retention:** Send `retain_agent_ids` and/or `retain_task_ids` in the DELETE body to move those entities to the `__retained__` holding org instead of deleting them.
+3. **Holding org hidden:** The `__retained__` org is filtered out from listing endpoints. To inspect it directly: `docker compose exec postgres psql -U assistant -c "SELECT id, name FROM organizations WHERE name = '__retained__';"`
+
 ### Organization Management
 
 - Telegram org lifecycle commands are available:
@@ -166,6 +179,79 @@ If the bot gives generic errors or "No tool call found" 400 errors:
   - `/orgs resume <id>`
   - `/orgs delete <id>`
 - Org deletes write durable `audit_log` entries in addition to org activity feed.
+
+### Repair Pipeline
+
+#### View Open Tickets (Telegram)
+```
+/tickets
+```
+Lists all open repair tickets with status icons, priority, and created timestamp.
+
+#### Approve a Verified Fix (Telegram)
+```
+/ticket approve <id>
+```
+Merges the verified branch to main. Owner-only. Triggers security challenge gate.
+
+#### Close a Ticket Without Deploying (Telegram)
+```
+/ticket close <id>
+```
+Marks the ticket `closed` in the DB. Branch is NOT merged.
+
+#### Force-clear the Pipeline Retry Counter
+If a valid error is being incorrectly blocked by the max-retries guard:
+```bash
+docker compose exec assistant python -c "
+from src.repair.engine import _PIPELINE_ATTEMPT_COUNTS
+_PIPELINE_ATTEMPT_COUNTS.clear()
+print('Retry counters cleared')
+"
+```
+Note: this counter is in-memory and resets automatically on container restart.
+
+#### Check Pending Repair in Redis
+```bash
+docker compose exec assistant python -c "
+import asyncio, redis.asyncio as aioredis, json
+async def check():
+    r = aioredis.from_url('redis://assistant-redis:6379/0', decode_responses=True)
+    keys = await r.keys('pending_repair:*')
+    for k in keys:
+        v = await r.get(k)
+        print(k, json.loads(v) if v else None)
+    await r.aclose()
+asyncio.run(check())
+"
+```
+
+#### Verification Failed Because Runner Is Wrong / Missing
+Symptom: a repair patch is rolled back with `No module named ruff` (or
+similar) in the verification stderr, even though the patch itself looks
+correct. Most common when patching `SKILL.md` or other non-Python files
+— ruff is a dev-only dep and is not installed in the runtime container.
+
+What to do:
+1. Reply `fix it` in Telegram. The repair agent now reads
+   `failure_kind: missing_tool` from the stored error context and calls
+   `refine_pending_verification` instead of re-proposing the patch.
+2. The agent auto-picks file-type-correct verification commands via
+   `python -m src.repair.verify_file <path>` (works for `.py`,
+   `SKILL.md`, `.yaml`, `.json`, `.toml`, `.md`).
+3. Reply `apply patch` to retry. The original patch is reapplied with the
+   new verification step.
+
+Manual sanity check from a shell:
+```bash
+docker compose exec assistant python -m src.repair.verify_file src/user_skills/<skill>/SKILL.md
+```
+Exit code 0 means the file is valid.
+
+#### Repair Notification Email Not Arriving
+1. Verify Gmail is connected: `/connect google` in Telegram.
+2. Check `docker compose logs assistant | findstr "Repair email"` for send status.
+3. If `[ERROR]` or `[CONNECTION ERROR]` in workspace tool result, MCP is disconnected — reconnect via `/connect google`.
 
 ## Monitoring Queries
 
@@ -184,4 +270,16 @@ WHERE is_active = true ORDER BY next_run_at;
 -- Tool usage stats
 SELECT name, use_count, last_used_at FROM tools 
 WHERE is_active = true ORDER BY use_count DESC;
+
+-- Open repair tickets
+SELECT id, title, status, priority, risk_level, auto_applied, created_at
+FROM repair_tickets
+WHERE status NOT IN ('deployed', 'closed')
+ORDER BY created_at DESC;
+
+-- Repair tickets ready to deploy
+SELECT id, title, branch_name, created_at
+FROM repair_tickets
+WHERE status = 'ready_for_deploy'
+ORDER BY created_at DESC;
 ```

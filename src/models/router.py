@@ -67,14 +67,14 @@ _ROUTING_MATRIX: dict[ModelRole, dict[TaskComplexity, str]] = {
         TaskComplexity.LOW:    "gpt-5.4-mini",
         TaskComplexity.MEDIUM: "gpt-5.4-mini",
         TaskComplexity.HIGH:   "gpt-5.4",
-        TaskComplexity.XHIGH:  "gpt-5.3-codex",
+        TaskComplexity.XHIGH:  "gpt-5.4",
     },
     ModelRole.REPAIR: {
         TaskComplexity.NONE:   "gpt-5.4-nano",
         TaskComplexity.LOW:    "gpt-5.4-mini",
         TaskComplexity.MEDIUM: "gpt-5.4-mini",
         TaskComplexity.HIGH:   "gpt-5.4",
-        TaskComplexity.XHIGH:  "gpt-5.3-codex",
+        TaskComplexity.XHIGH:  "gpt-5.4",
     },
     ModelRole.SAFETY: {
         TaskComplexity.NONE:   "gpt-5.4-nano",

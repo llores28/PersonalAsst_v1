@@ -12,20 +12,34 @@ A self-improving, multi-agent Personal Assistant that runs in Docker and talks t
 - **Conversation Memory** — SDK RedisSession gives the LLM real conversation history (last 20 turns) including tool calls and results.
 - **Self-Improving** — Reflector scores every interaction; Curator runs weekly optimization. Persona evolves.
 - **Digital Clone Onboarding** — Structured 3-session conversational interview builds a deep personality profile (OCEAN scores, communication style, work context, values). Based on Stanford/DeepMind research.
-- **Dynamic Tool Creation** — Ask it to build a new CLI tool and it generates, tests, and registers it automatically.
+- **Dynamic Tool Creation** — Ask it to build a new CLI tool and it generates, tests, and registers it automatically. The Dashboard Tools tab also has an **AI Wizard** button that walks you through tool creation interactively (interview → generate → review → save) with static-safety analysis.
 - **Task Scheduling** — "Remind me every Monday at 9am" or "Remind me today at 3pm" — recurring and one-shot jobs with natural language.
-- **Organization Management** — Manage organizations from Dashboard and Telegram (`/orgs create|info|pause|resume|delete`).
-- **AI-Guided Skill Creation** — Create custom skills via Telegram interview or Dashboard editor. Skills use declarative SKILL.md format with routing hints for natural language matching.
+- **Organization Management** — Manage organizations from Dashboard and Telegram (`/orgs create|info|pause|resume|delete`). Delete with a **preview dialog** that shows all agents, tasks, and activity that will be removed — check any items you want to **retain** (they are moved to a holding org instead of being cascade-deleted).
+- **AI-Guided Skill Creation** — Create custom skills via Telegram interview or Dashboard editor. Skills use declarative SKILL.md format with routing hints for natural language matching. **Duplicate-aware**: when an agent/tool/skill planned for a new project closely matches one you already have (similarity ≥ 85%), Atlas reuses the existing item instead of creating a near-duplicate, and tells you what it reused.
 - **Filesystem-Based Skills** — Drop a SKILL.md file in `user_skills/` and hot-reload without restart. Version controlled, portable, shareable.
 - **Safe by Design** — Context-aware input/output guardrails, sandboxed tool execution, cost caps, user allowlist.
-- **Self-Healing Diagnostics** — Repair agent inspects the repo read-only, generates repair plans, auto-applies low-risk operational fixes, and can apply approved patches after security verification with smoke test + rollback.
-- **Explainable Observability** — Every agent tool call is persisted as a trace step. Dashboard Timeline drawer shows full step-by-step agent thought trace per interaction.
+- **Unified Cost Tracking** — Shared `record_llm_cost()` helper (`src/models/cost_tracker.py`) with a single pricing table for all models. Every agent call is tracked to PostgreSQL (daily_costs) and Redis (per-provider). Supports OpenAI, Anthropic, and OpenRouter models.
+- **Self-Healing Diagnostics** — Repair agent inspects the repo read-only, generates repair plans, auto-applies low-risk operational fixes, and can apply approved patches after security verification with smoke test + rollback. You can also **open tickets manually** from the Dashboard Repairs tab and choose whether they go to the AI Agent (auto-repair pipeline) or the Admin (pauses until owner action).
+- **Customizable Dashboard** — The Overview tab uses a **draggable/resizable grid** (react-grid-layout). Rearrange and resize tiles (costs, quality, tools, schedules, budget, persona) by dragging their headers. Layout is auto-saved per user and persists across sessions. Reset to defaults with one click.
+- **Explainable Observability** — Every agent tool call is persisted as a trace step. Dashboard Timeline drawer shows full step-by-step agent thought trace per interaction. The **Interactions** tile on the Overview tab is clickable — it opens a drawer listing recent audit-log rows with filters (all / inbound / outbound / errors) and inline trace drill-down per row.
 - **Parallel Multi-Agent Execution** — Multi-domain requests (e.g., "Email Sarah AND schedule a meeting AND update the doc") fan out to 3 parallel agent branches simultaneously.
 - **Autonomous Background Jobs** — Say "Monitor my inbox until I get a reply from John" and Atlas creates a persistent background job with tick loop, fault tolerance, and Telegram notification when done.
 - **Stale Session Recovery** — Automatic detection and clearing of corrupt SDK sessions with transparent retry.
 - **Fully Self-Hosted** — All databases run in Docker. Zero SaaS calls for data storage.
 
-## Latest Updates (2026-04-12) — Agentic Upgrade M1–M4
+## Latest Updates (2026-04-23) — Dashboard Enhancement Phases 1–8
+
+- **Phase 1 — Tool Wizard** — AI-guided tool creation dialog in Dashboard Tools tab (interview → generate → review → save)
+- **Phase 2a — Cost Visibility** — Raised cost-tracking log level from DEBUG to INFO/WARNING; expanded `_OPENAI_MODEL_PRICING` with GPT-5.4, Claude Opus 4, OpenRouter models
+- **Phase 2b — Shared Cost Helper** — Extracted `record_llm_cost()` into `src/models/cost_tracker.py`; unified pricing table; wired into orchestrator
+- **Phase 3 — Duplicate Detection** — `setup_org_project` now fuzzy-matches agents, tools, and skills (≥ 85% similarity) and reuses existing items instead of creating near-duplicates
+- **Phase 4 — Selective Org Deletion** — Delete-preview endpoint (`GET /api/orgs/{id}/delete-preview`) shows agents, tasks, activity count; enhanced DELETE supports selective retention via holding org
+- **Phase 5 — Manual Tickets** — NewTicketDialog in Repairs tab for opening tickets manually (AI Agent or Admin pipeline)
+- **Phase 6 — Interactions Drill-Down** — Clickable Interactions tile opens a drawer with audit-log rows, filters, and inline trace drill-down
+- **Phase 7 — Tasks vs Jobs** — Tooltips + README_ORCHESTRATION section clarifying task/job distinction
+- **Phase 8 — Draggable Grid** — Overview tab uses react-grid-layout; 6 draggable/resizable tiles with per-user layout persistence (Redis-backed)
+
+### Previous Updates (2026-04-12) — Agentic Upgrade M1–M4
 
 - **M3 Explainable Observability** — `AgentTrace` table; every tool call step persisted; Dashboard Timeline drawer in Activity tab
 - **M4 Self-Healing Loop** — `classify_repair_risk()`, auto-apply for low-risk fixes, `verifier.py` smoke + rollback; Repairs tab with risk/status badges
@@ -138,8 +152,7 @@ docker compose up -d
 
 # 3-a. Rebuild
 docker compose down --remove-orphans
-docker compose build
-docker compose up -d
+docker compose up -d --build
 
 # 4. Connect Google Workspace
 # In Telegram: /connect google
@@ -233,7 +246,7 @@ src/
 ├── user_skills/                # User-created filesystem skills (hot-reloaded)
 ├── repair/                     # Repair engine, risk classifier, verifier + rollback [M4]
 ├── memory/                     # Mem0 (dedup + access tracking), Redis, persona
-├── models/                     # Model catalog + complexity-aware routing
+├── models/                     # Model catalog, complexity-aware routing, cost_tracker.py
 ├── tools/                      # Tool registry, sandbox, manifest schema
 ├── scheduler/                  # APScheduler engine, job callables, backup
 ├── integrations/               # Google Workspace MCP client

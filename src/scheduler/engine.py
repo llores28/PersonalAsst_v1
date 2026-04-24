@@ -106,9 +106,9 @@ async def add_cron_job(
     Returns:
         The job ID.
     """
+    func = _resolve_callable(func_path)  # Validate early — raises ValueError if path is broken
     scheduler = await get_scheduler()
     trigger = CronTrigger(**cron_kwargs, timezone=settings.default_timezone)
-    func = _resolve_callable(func_path)
     await scheduler.add_schedule(
         func_or_task_id=func,
         trigger=trigger,
@@ -130,17 +130,17 @@ async def add_interval_job(
     kwargs: Optional[dict] = None,
 ) -> str:
     """Add an interval-triggered job."""
+    func = _resolve_callable(func_path)  # Validate early — raises ValueError if path is broken
     scheduler = await get_scheduler()
     trigger_kwargs = {}
-    if seconds:
+    if seconds is not None:
         trigger_kwargs["seconds"] = seconds
-    if minutes:
+    if minutes is not None:
         trigger_kwargs["minutes"] = minutes
-    if hours:
+    if hours is not None:
         trigger_kwargs["hours"] = hours
 
     trigger = IntervalTrigger(**trigger_kwargs)
-    func = _resolve_callable(func_path)
     await scheduler.add_schedule(
         func_or_task_id=func,
         trigger=trigger,
