@@ -68,12 +68,11 @@ src/
 ├── main.py                     # Entry point
 ├── settings.py                 # Pydantic Settings (from .env)
 ├── alembic.ini                 # Alembic config (script_location = src/db/migrations)
-├── alembic/                    # Alembic migration env + versions (src/db/migrations)
-├── config/                     # Persona, safety policies, tool tiers (YAML)
+├── config/                     # Persona, safety, tool tiers, providers, openrouter_capabilities (YAML)
 ├── user_skills/                # User-created skills (SKILL.md, hot-reloaded via volume mount)
 ├── orchestration-ui/           # React Dashboard UI (src/orchestration-ui/src/Dashboard.js)
 ├── bot/                        # Telegram handlers, voice transcription
-├── agents/                     # 19 agent / runner files (OpenAI Agents SDK)
+├── agents/                     # 27 agent / runner files (OpenAI Agents SDK)
 │   ├── orchestrator.py         # Office organizer + complexity routing + SDK RedisSession
 │   ├── persona_mode.py         # Persona template + runtime datetime injection
 │   ├── routing_hardened.py     # TaskDomain/Intent enums + detect_parallel_domains() [M1]
@@ -93,25 +92,28 @@ src/
 │   ├── tool_factory_agent.py   # Dynamic tool creation (Handoff)
 │   ├── reflector_agent.py      # Quality scoring (ACE pattern)
 │   ├── curator_agent.py        # Weekly self-improvement (ACE)
-│   ├── repair_agent.py         # Risk classify + auto-apply + Telegram notify on low-risk apply [M4+]
+│   ├── repair_agent.py         # Self-healing orchestrator — risk classify, refine_pending_verification, rollback [M4+]
+│   ├── debugger_agent.py       # Repair Phase 1 — structured root-cause analysis
+│   ├── programmer_agent.py     # Repair Phase 3 — file-type aware fix generation (unified diff + test plan)
+│   ├── quality_control_agent.py # Repair Phase 4 — patch validation + security scan + allowlist enforcement
 │   ├── persona_interview_agent.py # 3-session personality profiling interview
 │   └── safety_agent.py         # Input/output guardrails
-├── skills/                     # Unified skill registry (10 skills)
-├── repair/                     # engine.py, verifier.py, notifications.py [M4+]
+├── skills/                     # Unified skill registry (10 skills + openrouter)
+├── repair/                     # engine.py, verifier.py, verify_file.py (file-type aware), notifications.py [M4+]
 ├── memory/                     # Mem0 (dedup + access tracking), Redis, persona
-├── models/                     # Model catalog, complexity-aware routing, cost_tracker.py
+├── models/                     # Model catalog, provider_resolution.py, cost_tracker.py (multi-LLM pricing)
 ├── tools/                      # Tool registry, sandbox, manifest, credential vault
 │   └── plugins/                # Dynamic tools (Docker volume, hot-reloaded)
 │       ├── linkedin/           # LinkedIn function-type tool (11 tools)
 │       └── onedrive/           # OneDrive function-type tool (7 tools)
 ├── scheduler/                  # APScheduler 4.x engine + job callables
 ├── security/                   # Owner challenge gate (PIN/security Q)
-├── integrations/               # Google Workspace MCP client
+├── integrations/               # Google Workspace MCP client + openrouter.py (multi-LLM)
 ├── orchestration/              # FastAPI Dashboard API + system_agents registry
 │   ├── api.py                  # All /api/* endpoints (orgs, agents, skills, traces, jobs, repairs, layout, activity, wizard)
 │   └── system_agents.py        # Built-in system agent registry (SystemAgentInfo)
-└── db/                         # SQLAlchemy models + Alembic migrations
-tests/                          # 23+ test files, 841+ test cases
+└── db/                         # SQLAlchemy models + Alembic migrations 001-010
+tests/                          # 40+ test modules covering agents, repair pipeline, multi-LLM
 # Root (bootstrap/project only):
 docker-compose.yml  Dockerfile  Dockerfile.orchestration
 .env  .env.example  requirements*.txt  pytest.ini  README.md
@@ -279,14 +281,15 @@ Dynamic tools that need API keys or passwords use the Redis-backed credential va
 ### Key Files
 | File | Role |
 |------|------|
-| `src/repair/engine.py` | Full pipeline orchestration, ticket CRUD, sandbox execution |
+| `src/repair/engine.py` | Full pipeline orchestration, ticket CRUD, sandbox execution, `suggest_verification_commands()` (file-type aware), `update_pending_verification_commands()`, `failure_kind="missing_tool"` detection |
 | `src/repair/verifier.py` | Post-apply smoke test + rollback for low-risk fixes |
+| `src/repair/verify_file.py` | File-type aware verifier — `python -m src.repair.verify_file <path>`. Dispatches by extension: `.py` → syntax check, `SKILL.md` → frontmatter validation, `.yaml`/`.json`/`.toml` → structural parse. Stdlib + pyyaml only (works in runtime container) |
 | `src/repair/models.py` | Pydantic contracts between pipeline stages |
 | `src/repair/notifications.py` | Email notifications (ticket created, fix ready) |
 | `src/bot/notifications.py` | Telegram push helpers (error alert, ticket, inline keyboard) |
-| `src/agents/repair_agent.py` | RepairAgent tools: analyze, propose patch, propose low-risk fix |
+| `src/agents/repair_agent.py` | RepairAgent tools: analyze, propose_patch, propose_low_risk_fix, **`refine_pending_verification`** (swap verification commands when previous runner was wrong for the file type — closes the dead-end after a `missing_tool` failure) |
 | `src/agents/debugger_agent.py` | DebuggerAgent: root-cause analysis with confidence score |
-| `src/agents/programmer_agent.py` | ProgrammerAgent: unified diff + test plan |
+| `src/agents/programmer_agent.py` | ProgrammerAgent: unified diff + file-type aware test plan (defaults to `verify_file`, not ruff) |
 | `src/agents/quality_control_agent.py` | QA validation: security scan + applicability check |
 
 ## Docker Services

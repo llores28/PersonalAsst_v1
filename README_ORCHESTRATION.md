@@ -413,6 +413,37 @@ curl -X POST http://localhost:8000/api/repairs \
   -d '{"title": "Fix login bug", "description": "...", "pipeline": "ai_agent"}'
 ```
 
+## Self-Healing Repair Pipeline (April 2026)
+
+The Repairs tab is backed by a four-stage agent pipeline:
+
+| Stage | Agent | File | Output |
+|-------|-------|------|--------|
+| 1. Audit | DebuggerAgent | `src/agents/debugger_agent.py` | `DebugAnalysis` (root cause, affected files, severity, confidence) |
+| 2. Plan  | RepairAgent | `src/agents/repair_agent.py` | RepairTicket with classified risk |
+| 3. Fix   | ProgrammerAgent | `src/agents/programmer_agent.py` | `FixProposal` (unified diff + file-type aware test plan) |
+| 4. QA    | QualityControlAgent | `src/agents/quality_control_agent.py` | `ValidationDecision` (GO / NO_GO / NEEDS_REVISION) |
+
+After validation passes, the patch is stored as a pending repair in Redis. Owner approval (`apply patch` in Telegram → security PIN) triggers `execute_pending_repair()`, which applies the diff in-place, runs verification, and rolls back on failure.
+
+**File-type aware verification (added 2026-04-23):** verification commands now route through `python -m src.repair.verify_file <path>` by default, which dispatches by extension (`.py` → syntax check, `SKILL.md` → loader validation, `.yaml`/`.json`/`.toml` → structural parse). Stdlib + pyyaml only — works in the runtime container where ruff/mypy aren't installed. If verification fails because the runner doesn't apply (`failure_kind=missing_tool`), `RepairAgent.refine_pending_verification` swaps the verification commands without re-proposing the patch — the owner just says `apply patch` again.
+
+## DB Migrations (April 2026)
+
+| Revision | File | Adds |
+|----------|------|------|
+| 006_user_settings | `src/db/migrations/versions/006_add_user_settings.py` | `user_settings` (per-user preferences, daily/monthly cost caps) |
+| 007_governance_spend_ancestry | `src/db/migrations/versions/007_governance_spend_ancestry.py` | Cost-attribution columns linking spend rows to ticket / org / job ancestry |
+| 008_add_missing_columns | `src/db/migrations/versions/008_add_missing_columns.py` | Backfill of missing columns flagged by audit |
+| 009_add_tts_voice | `src/db/migrations/versions/009_add_tts_voice.py` | TTS voice preference column on `user_settings` |
+| 010_add_agent_traces | `src/db/migrations/versions/010_add_agent_traces.py` | `agent_traces` table — per-tool-call thought trace for Dashboard Timeline drawer |
+
+Run `alembic upgrade head` (config at `src/alembic.ini` → `script_location = src/db/migrations`).
+
+## Multi-LLM via OpenRouter (April 2026)
+
+Provider routing (`src/models/provider_resolution.py`) selects between OpenAI, Anthropic, and 15+ OpenRouter models based on task complexity and capability tier (`src/config/openrouter_capabilities.yaml`). Cost tracking is unified through `src/models/cost_tracker.py:record_llm_cost()` which writes to PostgreSQL `daily_costs` and Redis per-provider counters. Set `OPENROUTER_API_KEY` to enable; `OPENROUTER_IMAGE_ENABLED=true` enables image generation/analysis.
+
 ### Dashboard UI Features
 - **Draggable/Resizable Overview Grid** — 6 tiles (costs, quality, tools, schedules, budget, persona) powered by react-grid-layout. Drag headers to rearrange, resize by dragging edges. Layout persisted per-user in Redis.
 - **Tool Wizard** — AI-guided dialog in Tools tab: interview → generate → review → save.

@@ -108,6 +108,14 @@
 - Tasks vs Jobs clarity with tooltips and documentation
 - Draggable/resizable Overview grid (react-grid-layout) with per-user Redis layout persistence
 
+### Phase 10 — src/ Consolidation + Self-Healing Agent Triad (COMPLETED 2026-04-23)
+
+- src/ consolidation per [ADR-2026-04-13](ADR-2026-04-13-src-consolidation.md): `alembic/`, `config/`, `orchestration-ui/`, `user_skills/` moved into `src/`; canonical alembic root at `src/db/migrations/`.
+- Multi-agent self-healing pipeline: DebuggerAgent (root-cause analysis) → RepairAgent (plan + risk classify) → ProgrammerAgent (unified-diff fix) → QualityControlAgent (security + allowlist validation).
+- File-type aware repair verification: `src/repair/verify_file.py` (stdlib + pyyaml only) replaces ruff defaults for non-Python files. `RepairAgent.refine_pending_verification` swaps verification commands without re-proposing the patch when the previous runner was wrong for the file type.
+- Multi-LLM via OpenRouter: `src/integrations/openrouter.py`, `src/models/provider_resolution.py`, `src/models/cost_tracker.py` with 15+ OpenRouter model pricing entries.
+- Migrations 006–010: user_settings, governance/spend ancestry, missing columns, TTS voice, agent_traces.
+
 ## 6) Functional Requirements
 
 | ID | Requirement | Priority | Rationale | Acceptance Criteria |
@@ -143,6 +151,9 @@
 | FR-029 | Manual Ticket Creation — open repair tickets from Dashboard with pipeline choice | P2 | UX | "New Ticket" button creates ticket; choose AI Agent or Admin pipeline |
 | FR-030 | Interactions Drill-Down — clickable tile opens drawer with audit-log rows and filters | P1 | Observability | Click Interactions tile → drawer with all/inbound/outbound/errors filters |
 | FR-031 | Draggable Dashboard Grid — customizable Overview layout persisted per user | P1 | UX | 6 tiles draggable/resizable; layout saved in Redis; "Reset Layout" restores defaults |
+| FR-032 | Self-Healing Agent Triad — multi-stage repair pipeline (DebuggerAgent → RepairAgent plan → ProgrammerAgent fix → QualityControlAgent validation) | P1 | Reliability | When a tool fails, the pipeline produces a structured DebugAnalysis, FixProposal (unified diff), and ValidationDecision before storing the patch for owner approval |
+| FR-033 | File-Type Aware Repair Verification — `python -m src.repair.verify_file <path>` dispatches by extension; never blames a patch when the runner is wrong for the file type | P1 | Reliability | Verifying a SKILL.md patch validates frontmatter via the skill loader (not ruff); .py uses syntax check; .yaml/.json/.toml use structural parse; missing-runner failures surface as `failure_kind=missing_tool` and route to `refine_pending_verification` instead of rolling back as a code failure |
+| FR-034 | Multi-LLM Provider Resolution — task complexity + capability tier select between OpenAI, Anthropic, and 15+ OpenRouter models via `src/models/provider_resolution.py` | P1 | Cost / capability | Model choice respects `src/config/openrouter_capabilities.yaml`; cost is recorded once via `record_llm_cost()` regardless of provider |
 
 ## 7) Non-Functional Requirements (NFR)
 

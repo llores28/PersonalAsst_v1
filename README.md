@@ -19,7 +19,8 @@ A self-improving, multi-agent Personal Assistant that runs in Docker and talks t
 - **Filesystem-Based Skills** — Drop a SKILL.md file in `user_skills/` and hot-reload without restart. Version controlled, portable, shareable.
 - **Safe by Design** — Context-aware input/output guardrails, sandboxed tool execution, cost caps, user allowlist.
 - **Unified Cost Tracking** — Shared `record_llm_cost()` helper (`src/models/cost_tracker.py`) with a single pricing table for all models. Every agent call is tracked to PostgreSQL (daily_costs) and Redis (per-provider). Supports OpenAI, Anthropic, and OpenRouter models.
-- **Self-Healing Diagnostics** — Repair agent inspects the repo read-only, generates repair plans, auto-applies low-risk operational fixes, and can apply approved patches after security verification with smoke test + rollback. You can also **open tickets manually** from the Dashboard Repairs tab and choose whether they go to the AI Agent (auto-repair pipeline) or the Admin (pauses until owner action).
+- **Self-Healing Diagnostics** — Multi-agent repair pipeline: **DebuggerAgent** does structured root-cause analysis, **ProgrammerAgent** generates a unified-diff fix with a file-type-aware test plan, **QualityControlAgent** validates patch + security + allowlist, then **RepairAgent** stores the plan for owner approval. Verification is file-type aware (Python → syntax check, SKILL.md → loader validation, YAML/JSON/TOML → structural parse) so non-Python patches don't get rejected by ruff. If verification fails because the runner is wrong for the file type, the agent calls `refine_pending_verification` instead of re-proposing the patch. You can also **open tickets manually** from the Dashboard Repairs tab and choose whether they go to the AI Agent (auto-repair pipeline) or the Admin (pauses until owner action).
+- **Multi-LLM via OpenRouter** — Provider-agnostic model routing (`src/models/provider_resolution.py`) selects between OpenAI, Anthropic, and 15+ OpenRouter models based on task complexity and configured capability tiers (`src/config/openrouter_capabilities.yaml`).
 - **Customizable Dashboard** — The Overview tab uses a **draggable/resizable grid** (react-grid-layout). Rearrange and resize tiles (costs, quality, tools, schedules, budget, persona) by dragging their headers. Layout is auto-saved per user and persists across sessions. Reset to defaults with one click.
 - **Explainable Observability** — Every agent tool call is persisted as a trace step. Dashboard Timeline drawer shows full step-by-step agent thought trace per interaction. The **Interactions** tile on the Overview tab is clickable — it opens a drawer listing recent audit-log rows with filters (all / inbound / outbound / errors) and inline trace drill-down per row.
 - **Parallel Multi-Agent Execution** — Multi-domain requests (e.g., "Email Sarah AND schedule a meeting AND update the doc") fan out to 3 parallel agent branches simultaneously.
@@ -27,7 +28,16 @@ A self-improving, multi-agent Personal Assistant that runs in Docker and talks t
 - **Stale Session Recovery** — Automatic detection and clearing of corrupt SDK sessions with transparent retry.
 - **Fully Self-Hosted** — All databases run in Docker. Zero SaaS calls for data storage.
 
-## Latest Updates (2026-04-23) — Dashboard Enhancement Phases 1–8
+## Latest Updates (2026-04-23) — src/ Consolidation + Self-Healing Agent Triad
+
+- **src/ consolidation** — `alembic/`, `config/`, `orchestration-ui/`, `user_skills/` all moved INTO `src/` per [ADR-2026-04-13](docs/ADR-2026-04-13-src-consolidation.md). Canonical alembic root is now `src/db/migrations/`.
+- **Self-healing agent triad** — Added `DebuggerAgent`, `ProgrammerAgent`, `QualityControlAgent` to the repair pipeline. RepairAgent now orchestrates Phase 1 (audit) → Phase 2 (diagnose) → Phase 3 (fix plan) → Phase 4 (validation + approval).
+- **File-type aware verification** — New `src/repair/verify_file.py` (stdlib + pyyaml only, runs in the bot container). `RepairAgent.refine_pending_verification` tool lets the agent swap verification commands without re-proposing the patch when the previous runner was wrong for the file type. See [docs/RUNBOOK.md](docs/RUNBOOK.md#verification-failed-because-runner-is-wrong--missing).
+- **Multi-LLM via OpenRouter** — `src/integrations/openrouter.py`, `src/models/provider_resolution.py`, `src/models/cost_tracker.py` with 15+ OpenRouter model entries.
+- **Migrations 006–010** — `006_add_user_settings`, `007_governance_spend_ancestry`, `008_add_missing_columns`, `009_add_tts_voice`, `010_add_agent_traces`.
+- **3 new user skills** — `src/user_skills/ffmpeg-video-composition/`, `pdf-generator-and-extractor/`, `video-processing/`.
+
+## Earlier Updates (2026-04-23) — Dashboard Enhancement Phases 1–8
 
 - **Phase 1 — Tool Wizard** — AI-guided tool creation dialog in Dashboard Tools tab (interview → generate → review → save)
 - **Phase 2a — Cost Visibility** — Raised cost-tracking log level from DEBUG to INFO/WARNING; expanded `_OPENAI_MODEL_PRICING` with GPT-5.4, Claude Opus 4, OpenRouter models
@@ -79,7 +89,10 @@ Telegram Bot (aiogram 3.x)
     ├── Skill Factory Agent   (AI-guided skill creation via interview)
     ├── Tool Factory Agent  (Handoff — generates CLI tools on demand)
     ├── Persona Interview   (Structured 3-session personality profiling)
-    ├── Repair Agent        (Handoff — risk classification, auto-apply low-risk, smoke test + rollback)
+    ├── Repair Agent        (Handoff — risk classification, auto-apply low-risk, file-type aware verification + rollback)
+    │   ├── Debugger Agent       (structured root-cause analysis)
+    │   ├── Programmer Agent     (unified-diff fix generation with file-type aware test plans)
+    │   └── Quality Control Agent (patch validation, security scan, allowlist enforcement)
     ├── Reflector Agent     (background quality scoring + trend tracking)
     ├── Curator Agent       (weekly self-improvement)
     └── Safety Agent        (input injection + output PII guardrails)
@@ -210,7 +223,7 @@ src/
 ├── main.py                     # Entry point
 ├── settings.py                 # Config from .env (Pydantic)
 ├── bot/                        # Telegram handlers, voice transcription
-├── agents/                     # 19 agent / runner files
+├── agents/                     # 27 agent / runner files
 │   ├── orchestrator.py         # Office organizer + complexity routing
 │   ├── persona_mode.py         # Persona template + prompt assembly (canonical)
 │   ├── routing_hardened.py     # TaskDomain/Intent enums + parallel domain detection
@@ -229,7 +242,11 @@ src/
 │   ├── tool_factory_agent.py   # Dynamic tool creation (Handoff)
 │   ├── reflector_agent.py      # Quality scoring + score tracking (ACE)
 │   ├── curator_agent.py        # Weekly self-improvement (ACE)
-│   ├── repair_agent.py         # Self-healing — risk classify, auto-apply, smoke test [M4]
+│   ├── repair_agent.py         # Self-healing orchestrator — risk classify, refine_pending_verification, rollback [M4]
+│   ├── debugger_agent.py       # Repair Phase 1 — structured root-cause analysis
+│   ├── programmer_agent.py     # Repair Phase 3 — file-type aware fix generation (unified diff + test plan)
+│   ├── quality_control_agent.py # Repair Phase 4 — patch validation + security scan + allowlist enforcement
+│   ├── skill_factory_agent.py  # AI-guided skill creation (interview → SKILL.md)
 │   ├── persona_interview_agent.py # Structured 3-session personality interview
 │   └── safety_agent.py         # Input/output guardrails
 ├── skills/                     # Unified skill registry (10 built-in + dynamic)
@@ -239,23 +256,22 @@ src/
 │   ├── validation.py           # On-demand skill testing (routing confidence)
 │   ├── google_workspace.py     # 8 Google Workspace skill builders
 │   ├── internal.py             # Memory + Scheduler skill builders
+│   ├── openrouter.py           # OpenRouter provider skill builder (multi-LLM)
 │   └── dynamic.py              # CLI/function tool skill builder
-├── agents/
-│   ├── skill_factory_agent.py  # AI-guided skill creation (interview → SKILL.md)
-│   └── ...
-├── user_skills/                # User-created filesystem skills (hot-reloaded)
-├── repair/                     # Repair engine, risk classifier, verifier + rollback [M4]
+├── user_skills/                # User-created SKILL.md skills (hot-reloaded via volume mount)
+├── config/                     # Persona, safety policies, tool tiers, providers, openrouter_capabilities (YAML)
+├── repair/                     # Repair engine, risk classifier, verify_file (file-type aware), notifications [M4]
 ├── memory/                     # Mem0 (dedup + access tracking), Redis, persona
-├── models/                     # Model catalog, complexity-aware routing, cost_tracker.py
+├── models/                     # Model catalog, provider_resolution.py, cost_tracker.py (multi-LLM pricing)
 ├── tools/                      # Tool registry, sandbox, manifest schema
 ├── scheduler/                  # APScheduler engine, job callables, backup
-├── integrations/               # Google Workspace MCP client
+├── integrations/               # Google Workspace MCP client, openrouter.py (multi-LLM)
 ├── orchestration/              # FastAPI Dashboard API (+ /api/traces, /api/repairs, /api/background-jobs)
-└── db/                         # SQLAlchemy models, Alembic migrations (006 adds agent_traces + background_jobs)
-config/                         # Persona, safety policies, tool tiers (YAML)
-tools/                          # Dynamic CLI tools (hot-reloaded)
-tests/                          # 20 test files, 493+ test cases
-docs/                           # Developer guide, runbook, user guide, PRD, ADRs
+├── orchestration-ui/           # React Dashboard UI (build artifacts gitignored)
+├── alembic.ini                 # Alembic config (script_location = src/db/migrations)
+└── db/                         # SQLAlchemy models, Alembic migrations 001-010 (010 adds agent_traces)
+tests/                          # 40+ test modules covering agents, repair pipeline, multi-LLM
+docs/                           # Developer guide, runbook, user guide, PRD, 5+ ADRs
 ```
 
 ## Key Design Decisions
