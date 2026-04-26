@@ -66,7 +66,7 @@ class TestIssueChallenge:
         mock_redis.set = AsyncMock()
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             result = await issue_challenge(
                 user_id=1,
                 pin_hash=hash_pin("1234"),
@@ -86,7 +86,7 @@ class TestIssueChallenge:
 
         qa = [{"q": "What is your pet's name?", "a_hash": hash_security_answer("fluffy")}]
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             result = await issue_challenge(
                 user_id=1,
                 security_qa=qa,
@@ -113,7 +113,7 @@ class TestVerifyChallenge:
         mock_redis.delete = AsyncMock()
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             assert await verify_challenge(user_id=1, answer="1234") is True
 
         mock_redis.delete.assert_called_once()
@@ -129,7 +129,7 @@ class TestVerifyChallenge:
         mock_redis.get = AsyncMock(return_value=challenge_data)
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             assert await verify_challenge(user_id=1, answer="9999") is False
 
     @pytest.mark.asyncio
@@ -138,7 +138,7 @@ class TestVerifyChallenge:
         mock_redis.get = AsyncMock(return_value=None)
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             assert await verify_challenge(user_id=1, answer="1234") is False
 
     @pytest.mark.asyncio
@@ -155,7 +155,7 @@ class TestVerifyChallenge:
         mock_redis.delete = AsyncMock()
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             assert await verify_challenge(user_id=1, answer="Fluffy") is True
 
 
@@ -165,17 +165,17 @@ class TestHasPendingChallenge:
     @pytest.mark.asyncio
     async def test_no_pending(self):
         mock_redis = AsyncMock()
-        mock_redis.exists = AsyncMock(return_value=0)
+        mock_redis.get = AsyncMock(return_value=None)
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             assert await has_pending_challenge(user_id=1) is False
 
     @pytest.mark.asyncio
     async def test_has_pending(self):
         mock_redis = AsyncMock()
-        mock_redis.exists = AsyncMock(return_value=1)
+        mock_redis.get = AsyncMock(return_value='{"type":"pin"}')
         mock_redis.aclose = AsyncMock()
 
-        with patch("src.security.challenge._redis", return_value=mock_redis):
+        with patch("src.security.challenge.get_redis", new=AsyncMock(return_value=mock_redis)):
             assert await has_pending_challenge(user_id=1) is True

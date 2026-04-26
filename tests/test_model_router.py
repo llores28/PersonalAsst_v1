@@ -33,11 +33,14 @@ class TestSelectModel:
         assert sel.model_id == "gpt-5.4-nano"
         assert sel.reasoning_effort == "none"
 
-    def test_coding_xhigh_returns_codex(self):
+    def test_coding_xhigh_returns_top_tier(self):
+        # Routing matrix evolved: gpt-5.3-codex was retired from CODING+XHIGH
+        # in favour of gpt-5.4 (a reasoning model that supports tool use).
+        # Codex variants are still seeded in src/models/seed.py for marketplace
+        # selection but no longer auto-selected by the router.
         sel = select_model(ModelRole.CODING, TaskComplexity.XHIGH)
-        assert sel.model_id == "gpt-5.3-codex"
-        # Codex models don't support reasoning_effort
-        assert sel.reasoning_effort is None
+        assert sel.model_id == "gpt-5.4"
+        assert sel.reasoning_effort == "high"
 
     def test_repair_medium_returns_mini(self):
         sel = select_model(ModelRole.REPAIR, TaskComplexity.MEDIUM)
@@ -69,9 +72,17 @@ class TestSelectModel:
         assert sel.model_id == "gpt-5.4"
         assert sel.reasoning_effort == "medium"
 
-    def test_non_reasoning_model_has_none_effort(self):
-        sel = select_model(ModelRole.CODING, TaskComplexity.XHIGH)
-        # gpt-5.3-codex is not in _REASONING_MODELS
+    @patch("src.models.router.settings")
+    def test_non_reasoning_model_has_none_effort(self, mock_settings):
+        # When a routed/default model is NOT in _REASONING_MODELS, the router
+        # must drop reasoning_effort to None even if a default effort was
+        # requested. We exercise this via the settings-fallback path (no
+        # complexity → settings default) using gpt-4o, which is intentionally
+        # absent from the _REASONING_MODELS frozenset.
+        mock_settings.model_general = "gpt-4o"
+        mock_settings.default_reasoning_effort = "high"
+        sel = select_model(ModelRole.GENERAL)
+        assert sel.model_id == "gpt-4o"
         assert sel.reasoning_effort is None
 
     def test_api_docs_url_format(self):

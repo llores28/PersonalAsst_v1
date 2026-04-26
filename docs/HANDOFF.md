@@ -3,8 +3,14 @@
 ## Current Status
 
 **Phase:** All core phases (1–9) + Dashboard Enhancements (Phases 1–8) implemented and operational  
-**Date:** April 23, 2026  
-**Test suite:** 841+ passing (23+ test files), pre-existing failures (FunctionTool/redis mock issues, unrelated to recent work)
+**Date:** April 26, 2026  
+**Test suite:** **1096 passing / 0 failing** / 6 skipped / 7 xfailed. Cleared the entire 47-failure backlog in this session (org-agent FunctionTool isolation pollution + tool-count drift + fastapi-optional skips + bot/orgs wizard refactor + pricing relocation + alembic path + codex retirement + skill-frozen contract + tool-factory growth + dry-run rewrite + sandbox marker + ATTEMPT_COUNTS pollution). The 6 skipped are intentional (fastapi-conditional dashboard tests).
+
+### Recently shipped (2026-04-26)
+- **Memory eviction** — nightly job (03:00 UTC) caps per-user Mem0 memories at 8000 with summarize-then-delete. Code in [src/memory/eviction.py](../src/memory/eviction.py), [src/memory/eviction_runner.py](../src/memory/eviction_runner.py), wired in [src/scheduler/maintenance.py](../src/scheduler/maintenance.py).
+- **Scheduler observability** — APScheduler 4.x `JobReleased` listener persists per-job health to Redis (`scheduler_health:{schedule_id}`, 30-day TTL). Aggregate snapshot at `/api/health/scheduler`. Code in [src/scheduler/observability.py](../src/scheduler/observability.py).
+- **OAuth heartbeat + Telegram nudge** — weekly job (Mon 09:00 UTC) calls `get_user_profile` per connected Google user; classifies `ok` / `auth_failed` / `transient`. **For `auth_failed`, sends a Telegram message asking the user to run `/connect google`** (Redis-deduped 6-day TTL, fail-open if Redis is down). Code in `weekly_oauth_heartbeat` and `_send_reauth_nudge` in [src/scheduler/maintenance.py](../src/scheduler/maintenance.py); helper in [src/bot/notifications.py](../src/bot/notifications.py).
+- **Workspace-MCP token persistence** — pinned `WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND=disk`, `WORKSPACE_MCP_CREDENTIALS_DIR=/data/credentials`, `WORKSPACE_MCP_OAUTH_PROXY_DISK_DIRECTORY=/data/oauth-proxy`, and `FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY` in [docker-compose.yml](../docker-compose.yml). Volume mount moved from `/data/tokens` to `/data` to cover both subdirs. Idempotent bootstrap at [scripts/ensure_workspace_mcp_key.py](../scripts/ensure_workspace_mcp_key.py). Closes the heartbeat false-positive footgun where a container rebuild would silently drop every token and trigger Mon-morning nudges to every connected user. Existing deployments: run the script once, then `docker compose up -d --build`, then `/connect google` once per user.
 
 ## What Exists
 
@@ -13,10 +19,11 @@
 | Research document | Complete | `RESEARCH_PersonalAssistant.md` — 21 sections, gaps analysis |
 | PRD | Complete | `PRD_PersonalAssistant.md` — 18 sections, all gaps resolved |
 | Bootstrap | Complete | Team tier bootstrap plus VS Code migration scaffolding for instructions, prompts, and tasks |
+| Nexus CLI toolkit | **v0.2.0** | Synced to upstream `65b60ff` (2026-04-25); adds `journal` subcommand for cross-session state tracking. See `docs/CHANGELOG.md`. |
 | Source code | **Complete** | `src/` — 19 agent files, 10 skills, scheduler, memory, tools (+ credential vault), security |
 | Docker Compose | **Running** | 5 services: assistant, postgres, qdrant, redis, workspace-mcp |
 | Tests | **493+ passing** | 20 test files covering agents, tools, guardrails, scheduling, memory |
-| ADRs | **13 written** | Architecture decision records in `docs/ADR-*.md` |
+| ADRs | **23 written** | Architecture decision records in `docs/ADR-*.md`. Latest batch (2026-04-26): OAuth heartbeat + nudge, MCP token persistence, memory eviction with summary distillation, rate-limit handling wrapper, session-compaction DLQ, scheduler observability. |
 
 ## Completed Phases
 

@@ -130,12 +130,29 @@ class TestToolFactoryAgent:
         from src.agents.tool_factory_agent import create_tool_factory_agent
         agent = create_tool_factory_agent()
         assert agent.name == "ToolFactoryAgent"
-        assert len(agent.tools) == 3  # generate_cli_tool, list_available_tools, review_tool_code
+        # The factory grew from 3 to 5 tools (added generate_http_tool +
+        # get_org_catalog for live model/pricing lookups). Asserting names
+        # gives a useful diff if anything is added/removed.
+        expected = {
+            "generate_cli_tool",
+            "generate_http_tool",
+            "get_org_catalog",
+            "list_available_tools",
+            "review_tool_code",
+        }
+        actual = {getattr(t, "name", None) or getattr(t, "__name__", None) for t in agent.tools}
+        assert actual == expected
+        assert len(agent.tools) == len(expected)
 
     def test_instructions_contain_decision_tree(self) -> None:
         from src.agents.tool_factory_agent import TOOL_FACTORY_INSTRUCTIONS
+        # Structural tests: assert section headers + the four canonical tool
+        # categories appear in the decision tree. The exact tagline ("default")
+        # changed when the HTTP API path was promoted alongside CLI.
+        assert "Tool Type Decision Tree" in TOOL_FACTORY_INSTRUCTIONS
         assert "standalone script" in TOOL_FACTORY_INSTRUCTIONS
-        assert "CLI Tool (default)" in TOOL_FACTORY_INSTRUCTIONS
+        assert "CLI Tool" in TOOL_FACTORY_INSTRUCTIONS
+        assert "HTTP API Tool" in TOOL_FACTORY_INSTRUCTIONS
         assert "function_tool" in TOOL_FACTORY_INSTRUCTIONS
         assert "specialist agent" in TOOL_FACTORY_INSTRUCTIONS
 

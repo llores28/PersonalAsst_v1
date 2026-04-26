@@ -107,10 +107,17 @@ class TestSkillDefinition:
         )
         assert skill.tool_names() == []
 
-    def test_frozen_prevents_mutation(self) -> None:
+    def test_skill_definition_is_mutable(self) -> None:
+        # SkillDefinition is intentionally a regular @dataclass (not frozen) —
+        # the dashboard's skill-edit endpoint
+        # (src/orchestration/api.py:4573) mutates `name`, `description`, and
+        # `tags` in place when the user edits a skill. If you reintroduce
+        # `frozen=True`, that flow breaks. This test pins that contract.
         skill = _make_skill()
-        with pytest.raises(AttributeError):
-            skill.id = "changed"  # type: ignore[misc]
+        skill.id = "changed"  # must not raise
+        assert skill.id == "changed"
+        skill.tags = ["new", "tags"]
+        assert skill.tags == ["new", "tags"]
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +357,11 @@ class TestGetInstructions:
 
 class TestListSkills:
     def test_list_skills_returns_metadata(self) -> None:
+        # `metadata_dict()` exposes Level-1 metadata (always-loaded). Tool
+        # count is intentionally NOT in this dict — it's only relevant when
+        # the skill is fully loaded for invocation (Level 2/3). If you need
+        # to add tool_count back, update both `metadata_dict()` and this
+        # test together.
         reg = SkillRegistry()
         reg.register(_make_skill(
             "gmail",
@@ -361,8 +373,12 @@ class TestListSkills:
         item = items[0]
         assert item["id"] == "gmail"
         assert item["group"] == "google_workspace"
-        assert item["tool_count"] == 1
         assert item["tags"] == ["email"]
+        # Spot-check a few of the other documented Level-1 keys.
+        assert "name" in item
+        assert "description" in item
+        assert "version" in item
+        assert "is_active" in item
 
     def test_list_skills_respects_profile(self) -> None:
         reg = SkillRegistry()

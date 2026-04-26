@@ -165,7 +165,7 @@ app.add_middleware(
 
 # ── API Key Authentication ────────────────────────────────────────────
 # Endpoints that don't require auth (health, root, OPTIONS)
-_PUBLIC_PATHS = {"/", "/api/health", "/docs", "/openapi.json", "/redoc"}
+_PUBLIC_PATHS = {"/", "/api/health", "/api/health/scheduler", "/docs", "/openapi.json", "/redoc"}
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -631,6 +631,25 @@ async def get_config():
         "api_version": "2.0.0",
         "auth_required": bool(_settings.dashboard_api_key),
     }
+
+
+@app.get("/api/health/scheduler")
+async def scheduler_health():
+    """Return a snapshot of every internal scheduled job's last-run state.
+
+    Aggregate `status` is "healthy" if every job has zero consecutive
+    failures, "degraded" if any job has >= 3 consecutive failures (alert
+    threshold), or "unknown" if no health records exist yet (e.g. fresh
+    container, no jobs have fired). Public — observability endpoint should
+    be reachable without an API key for monitoring tools.
+    """
+    try:
+        from src.scheduler.observability import get_health_snapshot
+        return await get_health_snapshot()
+    except Exception as e:
+        logger.warning("scheduler_health endpoint failed: %s", e)
+        return {"status": "unknown", "jobs": [],
+                "summary": {"error": str(e)}}
 
 
 @app.get("/api/health", response_model=HealthResponse)

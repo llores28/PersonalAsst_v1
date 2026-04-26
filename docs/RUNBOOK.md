@@ -150,6 +150,78 @@ If the bot gives generic errors or "No tool call found" 400 errors:
    - **`FunctionTool object is not callable`** → bound tools must call `_*_impl` functions, not `@function_tool` objects
    - **Naive datetime rejected** → engine auto-attaches default timezone, but verify `DEFAULT_TIMEZONE` in `.env`
 
+### Workspace-MCP token persistence
+
+**Why this matters:** The OAuth heartbeat (`_internal_weekly_oauth_heartbeat`) sends a Telegram nudge to any user it classifies as `auth_failed`. If workspace-mcp loses its tokens on container rebuild, *every* connected user gets nudged on the next Monday — looking exactly like a mass token revocation. We pin three settings in [docker-compose.yml](../docker-compose.yml) to prevent this:
+
+| Variable | Value | Why |
+|---|---|---|
+| `WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND` | `disk` | Image's Linux default is `memory` — proxy state evaporates on restart. |
+| `WORKSPACE_MCP_OAUTH_PROXY_DISK_DIRECTORY` | `/data/oauth-proxy` | Lands inside the named volume. |
+| `WORKSPACE_MCP_CREDENTIALS_DIR` | `/data/credentials` | Image's default is `~/.google_workspace_mcp/credentials` — written to the writable layer (not the volume). |
+| `FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY` | from `WORKSPACE_MCP_SIGNING_KEY` | Without this, the image derives the Fernet key from `GOOGLE_OAUTH_CLIENT_SECRET` — silent token loss on client-secret rotation. |
+
+The named `workspace_tokens` volume is mounted at `/data` (covers both `/data/credentials` and `/data/oauth-proxy`).
+
+**First-time setup:**
+```bash
+cp .env.example .env       # if you haven't already
+python scripts/ensure_workspace_mcp_key.py   # generates WORKSPACE_MCP_SIGNING_KEY
+docker compose up -d
+```
+
+`scripts/ensure_workspace_mcp_key.py` is idempotent — it only writes if the key is missing/empty. Re-run any time without risk.
+
+**Recovery procedures:**
+
+*If you lost your `.env` (and therefore `WORKSPACE_MCP_SIGNING_KEY`):*
+1. Generate a new key via the script.
+2. The persisted tokens in the `workspace_tokens` volume are now unreadable. Don't try to "rotate" — just have all users run `/connect google` again. The Mon 09:00 UTC heartbeat will detect the auth failures and nudge them automatically; you can also force the cycle by running `weekly_oauth_heartbeat()` manually (see "Run a job manually" below).
+
+*If `docker compose down -v` was run and the volume was deleted:*
+- All persisted tokens are gone. Same recovery as above.
+
+*To verify persistence is actually working:*
+```bash
+# Restart workspace-mcp and confirm tokens survive.
+docker compose restart workspace-mcp
+# Then run a heartbeat scoped to one connected user — should report "ok".
+docker compose exec assistant python -c "
+import asyncio
+from src.scheduler.maintenance import weekly_oauth_heartbeat
+print(asyncio.run(weekly_oauth_heartbeat(user_ids=[<your_telegram_id>])))
+"
+```
+
+### System maintenance jobs
+
+Two internal jobs run automatically on every scheduler start:
+
+| Schedule ID | Cadence | Purpose |
+|---|---|---|
+| `_internal_nightly_memory_eviction` | Daily 03:00 UTC | Caps each user's Mem0 memories (default 8000) by summarize-then-delete. Per-user retry (tenacity, 3 attempts) + per-user try/except — one user's failure cannot abort the batch. |
+| `_internal_weekly_oauth_heartbeat` | Mon 09:00 UTC | Calls `get_user_profile` per connected Google user to reset Google's 6-month idle clock and detect revoked tokens. On `auth_failed`, sends a Telegram nudge asking the user to run `/connect google` (Redis-deduped 6 days). |
+
+**Inspect health:** `GET /api/health/scheduler` returns the per-job snapshot persisted by the `JobReleased` listener. Status is `healthy` (no failures), `degraded` (any job ≥3 consecutive failures), or `unknown` (no runs recorded yet).
+
+**Run a job manually (debugging):**
+```bash
+docker compose exec assistant python -c "
+import asyncio
+from src.scheduler.maintenance import weekly_oauth_heartbeat
+print(asyncio.run(weekly_oauth_heartbeat(user_ids=[<telegram_id>])))
+"
+```
+
+**Inspect / reset OAuth nudge dedup:**
+```bash
+# Is a user currently in the dedup window?
+docker compose exec redis redis-cli GET "notification_sent:<telegram_id>:oauth_reauth"
+
+# Force re-nudge on the next heartbeat (rarely needed — heartbeat re-nudges weekly anyway):
+docker compose exec redis redis-cli DEL "notification_sent:<telegram_id>:oauth_reauth"
+```
+
 ### Dashboard API Access / CORS
 
 1. Configure dashboard origins in `.env`:

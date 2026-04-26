@@ -13,6 +13,29 @@ sys.modules["redis"] = MagicMock()
 sys.modules["redis.asyncio"] = MagicMock()
 
 
+@pytest.fixture(autouse=True)
+def _reset_pipeline_attempt_counts():
+    """Clear the global ``_PIPELINE_ATTEMPT_COUNTS`` cache before each test.
+
+    All TestSelfHealingPipeline cases drive `run_self_healing_pipeline` with
+    the same `(user_telegram_id, error_description)` fingerprint, so the
+    in-memory retry counter accumulates across tests in the same session and
+    the third test gets blocked with `MAX_RETRIES_EXCEEDED` instead of running
+    its assertion. Resetting before every test makes ordering irrelevant.
+    """
+    try:
+        from src.repair import engine
+        engine._PIPELINE_ATTEMPT_COUNTS.clear()
+    except Exception:
+        pass
+    yield
+    try:
+        from src.repair import engine
+        engine._PIPELINE_ATTEMPT_COUNTS.clear()
+    except Exception:
+        pass
+
+
 class TestSelfHealingPipeline:
     """Test the integrated self-healing pipeline."""
 
@@ -191,16 +214,29 @@ class TestDryRunPatch:
 
     @pytest.mark.asyncio
     async def test_dry_run_reports_failed_patch(self):
-        """Test dry-run reports failure for bad patch."""
+        """Dry-run must detect a context-mismatch hunk.
+
+        The implementation switched from `git apply --check` (subprocess) to a
+        pure-Python read-only simulation that parses each hunk and compares
+        the context lines against the actual file content. To exercise the
+        failure path we feed a diff that targets `requirements.txt` (an
+        always-present file in this repo) with deliberately bogus context —
+        the hunk's first three lines won't match the real file, so the
+        function returns a "does not apply" message.
+        """
         from src.repair.engine import _dry_run_patch
 
-        mock_rc = 1
-        mock_stdout = ""
-        mock_stderr = "patch does not apply"
-
-        with patch("src.repair.engine._run_command_parts", new=AsyncMock(return_value=(mock_rc, mock_stdout, mock_stderr))):
-            result = await _dry_run_patch("bad diff content")
-
+        bad_diff = (
+            "diff --git a/requirements.txt b/requirements.txt\n"
+            "--- a/requirements.txt\n"
+            "+++ b/requirements.txt\n"
+            "@@ -1,3 +1,3 @@\n"
+            " __THIS_LINE_DOES_NOT_EXIST_IN_REQUIREMENTS_TXT__\n"
+            " __NEITHER_DOES_THIS_ONE__\n"
+            "-__OR_THIS_THIRD_BOGUS_LINE__\n"
+            "+__REPLACEMENT__\n"
+        )
+        result = await _dry_run_patch(bad_diff)
         assert "does not apply" in result.lower()
 
 
@@ -219,8 +255,15 @@ class TestSandboxTest:
         mock_model.unified_diff = "test diff"
         mock_model.test_plan = ["pytest tests/"]
 
+        # `_run_sandbox_test` matches against the EXACT success-marker
+        # substrings produced by execute_pending_repair, including
+        # "Patch Verified in Sandbox" (not just "Patch Verified"). The mock
+        # must echo one of those markers verbatim.
         with patch("src.repair.engine.store_pending_repair", new=AsyncMock()):
-            with patch("src.repair.engine.execute_pending_repair", new=AsyncMock(return_value="✅ Patch Verified")):
+            with patch(
+                "src.repair.engine.execute_pending_repair",
+                new=AsyncMock(return_value="✅ Patch Verified in Sandbox - Awaiting Deploy Approval"),
+            ):
                 result = await _run_sandbox_test(
                     user_telegram_id=12345,
                     ticket_id=1,

@@ -145,6 +145,13 @@ _REPAIR_EXPLICIT_PHRASES = (
     "diagnose the app",
     "debug this app",
     "diagnose this app",
+    "determine a better verification command",
+    "determine the verification command",
+    "refine the verification",
+    "refine verification",
+    "better verification command",
+    "fix the verification command",
+    "wrong verification command",
 )
 _REPAIR_DEBUG_VERBS = (
     "fix",
@@ -2130,10 +2137,26 @@ def _handoff_capable_instructions(prompt: str) -> str:
     return prompt_with_handoff_instructions(prompt)
 
 
+_FAILED_REPAIR_HANDOFF_STANDALONE = (
+    "can't continue the repair workflow",
+    "cannot continue the repair workflow",
+    "can't continue the repair",
+    "cannot continue the repair",
+    "can't continue the workflow",
+    "cannot continue the workflow",
+    "can't proceed with the repair",
+    "cannot proceed with the repair",
+)
+
+
 def _response_indicates_failed_repair_handoff(response_text: str) -> bool:
     lowered = " ".join((response_text or "").strip().lower().split())
     if not lowered:
         return False
+    # High-confidence standalone phrases — no "repair agent" guard needed
+    if any(phrase in lowered for phrase in _FAILED_REPAIR_HANDOFF_STANDALONE):
+        return True
+    # Other phrases require "repair agent" context to avoid false positives
     if "repair agent" not in lowered:
         return False
     return any(phrase in lowered for phrase in _FAILED_REPAIR_HANDOFF_PHRASES)
@@ -2168,22 +2191,41 @@ async def _is_fix_it_with_context(user_telegram_id: int, user_message: str) -> b
 
 async def _run_repair_agent_direct(user_telegram_id: int, user_message: str) -> str:
     from src.agents.repair_agent import RepairContext, create_repair_agent
-    from src.memory.conversation import get_last_tool_error, clear_last_tool_error
+    from src.memory.conversation import get_last_tool_error
 
-    # Prepend stored error context so the repair agent knows what failed
+    # Prepend stored error context so the repair agent knows what failed.
+    # We intentionally do NOT clear the error here — the agent's get_error_context
+    # tool will retrieve it directly from Redis during the run, and the tool
+    # itself decides when to consume/clear it. Clearing eagerly here caused the
+    # agent to see an empty error context when it called get_error_context().
     error_ctx = await get_last_tool_error(user_telegram_id)
     enriched_message = user_message
     if error_ctx:
+        failure_kind = error_ctx.get('failure_kind', 'code_failure')
+        retry = error_ctx.get('retry_context', False)
+        extra = ""
+        if retry and failure_kind == "missing_tool":
+            extra = (
+                "\n**Hint:** The previous verification command was wrong for the file "
+                "type (missing_tool). Call `refine_pending_verification` to auto-pick "
+                "the correct command, then tell the owner to say `apply patch` again."
+            )
+        elif retry:
+            extra = (
+                "\n**Hint:** The patched code failed verification. Analyze the stderr "
+                "above and propose a revised diff via `propose_patch`."
+            )
         error_block = (
             "## Recent Error Context (auto-captured)\n"
             f"**User request that failed:** {error_ctx.get('user_message', 'N/A')}\n"
             f"**Atlas response:** {error_ctx.get('assistant_response', 'N/A')}\n"
-            f"**Timestamp:** {error_ctx.get('timestamp', 'N/A')}\n\n"
+            f"**failure_kind:** {failure_kind}\n"
+            f"**Timestamp:** {error_ctx.get('timestamp', 'N/A')}"
+            f"{extra}\n\n"
             "---\n\n"
             f"**Owner's current request:** {user_message}"
         )
         enriched_message = error_block
-        await clear_last_tool_error(user_telegram_id)
 
     repair_agent = create_repair_agent()
     sdk_session = await _get_agent_session(user_telegram_id)

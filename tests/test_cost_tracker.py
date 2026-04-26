@@ -20,17 +20,22 @@ class TestTrackCost:
     async def test_tracks_cost_successfully(self):
         """Test that cost is tracked in database."""
         from src.models.cost_tracker import track_cost
-        
-        with patch("src.models.cost_tracker.async_session") as mock_session_class:
+
+        # Bypass `_resolve_db_user_id` (which adds its own SELECT) and
+        # `_track_provider_cost` (which awaits Redis) so this test stays
+        # focused on the UPDATE/INSERT logic on the daily_costs row.
+        with patch("src.models.cost_tracker.async_session") as mock_session_class, \
+             patch("src.models.cost_tracker._resolve_db_user_id", AsyncMock(return_value=42)), \
+             patch("src.models.cost_tracker._track_provider_cost", AsyncMock()):
             mock_session = AsyncMock()
             mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_class.return_value.__aexit__ = AsyncMock(return_value=False)
-            
+
             # Mock update returning rowcount=0 (no existing record)
             mock_result = MagicMock()
             mock_result.rowcount = 0
             mock_session.execute = AsyncMock(return_value=mock_result)
-            
+
             result = await track_cost(
                 user_id=123,
                 provider="anthropic",
@@ -39,26 +44,29 @@ class TestTrackCost:
                 output_tokens=500,
                 cost_usd=0.015,
             )
-            
+
             assert result is True
-            # Should have called execute twice (update, then insert)
+            # UPDATE then INSERT — the resolution SELECT lives in a separate
+            # session inside `_resolve_db_user_id` (bypassed above).
             assert mock_session.execute.call_count == 2
 
     @pytest.mark.asyncio
     async def test_updates_existing_record(self):
         """Test that existing daily record is updated."""
         from src.models.cost_tracker import track_cost
-        
-        with patch("src.models.cost_tracker.async_session") as mock_session_class:
+
+        with patch("src.models.cost_tracker.async_session") as mock_session_class, \
+             patch("src.models.cost_tracker._resolve_db_user_id", AsyncMock(return_value=42)), \
+             patch("src.models.cost_tracker._track_provider_cost", AsyncMock()):
             mock_session = AsyncMock()
             mock_session_class.return_value.__aenter__ = AsyncMock(return_value=mock_session)
             mock_session_class.return_value.__aexit__ = AsyncMock(return_value=False)
-            
+
             # Mock update returning rowcount=1 (existing record updated)
             mock_result = MagicMock()
             mock_result.rowcount = 1
             mock_session.execute = AsyncMock(return_value=mock_result)
-            
+
             result = await track_cost(
                 user_id=123,
                 provider="openai",
@@ -67,9 +75,9 @@ class TestTrackCost:
                 output_tokens=50,
                 cost_usd=0.002,
             )
-            
+
             assert result is True
-            # Should only call execute once (update)
+            # Only the UPDATE — INSERT skipped because rowcount=1.
             assert mock_session.execute.call_count == 1
 
 

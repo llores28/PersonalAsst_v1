@@ -10,6 +10,7 @@ import time
 from typing import Any, Optional
 
 import redis.asyncio as aioredis
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.settings import settings
 
@@ -17,6 +18,15 @@ logger = logging.getLogger(__name__)
 
 SESSION_TTL = 1800  # 30 minutes
 MAX_TURNS = 20  # Max conversation turns to keep in session
+
+# Dead-letter queue for compaction failures: keep failed payloads for 7 days
+# so an operator (or future background worker) can recover and replay them.
+_COMPACT_DLQ_TTL = 86400 * 7
+
+
+def _compaction_dlq_key(user_id: int) -> str:
+    return f"compaction_dlq:{user_id}"
+
 
 _redis: Any = None
 
@@ -296,48 +306,87 @@ async def get_session_metadata(user_id: int) -> Optional[dict]:
     return meta if meta else None
 
 
-async def _compact_turns_to_memory(user_id: int, old_turns: list[dict]) -> None:
-    """Summarize dropped turns and flush to Mem0 long-term memory.
-
-    Called as a fire-and-forget task when session exceeds MAX_TURNS.
-    Follows the OpenClaw session compaction pattern: context that leaves
-    the active window is summarized (not silently discarded).
-    """
-    if len(old_turns) < 2:
-        return  # Not enough to summarize
-
+@retry(
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=1, min=1, max=4),
+    reraise=True,
+)
+async def _compact_turns_to_memory_with_retry(user_id: int, old_turns: list[dict]) -> None:
+    """Inner: summarize via LLM and write to Mem0. Raises on any failure so
+    tenacity retries up to 3 times with exponential backoff. The outer
+    `_compact_turns_to_memory` catches the post-retry exception and dead-letters
+    so context is never silently lost."""
     conversation_text = "\n".join(
         f"{'User' if t['role'] == 'user' else 'Assistant'}: {t['content'][:500]}"
         for t in old_turns
     )
 
+    from agents import Agent, Runner
+
+    summarizer = Agent(
+        name="SessionCompactor",
+        instructions=(
+            "Summarize this conversation fragment in 1-2 sentences. "
+            "Focus on: what the user asked for, key decisions made, "
+            "any preferences expressed. Be factual and concise."
+        ),
+        model=settings.model_fast,
+    )
+    result = await Runner.run(summarizer, conversation_text)
+    summary = result.final_output
+
+    from src.memory.mem0_client import add_memory
+    await add_memory(
+        f"Session context (compacted): {summary}",
+        user_id=str(user_id),
+        metadata={"type": "episodic", "source": "session_compaction", "turns": len(old_turns)},
+    )
+
+
+async def _compact_turns_to_memory(user_id: int, old_turns: list[dict]) -> None:
+    """Summarize dropped turns and flush to Mem0 long-term memory.
+
+    Called as a fire-and-forget task from `add_turn` when session exceeds
+    MAX_TURNS. Retries the LLM+Mem0 work up to 3 times; on exhaustion the raw
+    turns are dead-lettered to a Redis list (`compaction_dlq:{user_id}`, 7-day
+    TTL) so they can be replayed later — context is never silently discarded
+    even when the summarization path is down.
+    """
+    if len(old_turns) < 2:
+        return  # Not enough to summarize
+
+    last_error: Optional[str] = None
     try:
-        from agents import Agent, Runner
-
-        summarizer = Agent(
-            name="SessionCompactor",
-            instructions=(
-                "Summarize this conversation fragment in 1-2 sentences. "
-                "Focus on: what the user asked for, key decisions made, "
-                "any preferences expressed. Be factual and concise."
-            ),
-            model=settings.model_fast,
-        )
-        result = await Runner.run(summarizer, conversation_text)
-        summary = result.final_output
-
-        from src.memory.mem0_client import add_memory
-        await add_memory(
-            f"Session context (compacted): {summary}",
-            user_id=str(user_id),
-            metadata={"type": "episodic", "source": "session_compaction", "turns": len(old_turns)},
-        )
+        await _compact_turns_to_memory_with_retry(user_id, old_turns)
         logger.info(
             "Compacted %d turns to memory for user %d",
             len(old_turns), user_id,
         )
+        return
     except Exception as e:
-        logger.warning("Session compaction failed for user %d (non-critical): %s", user_id, e)
+        last_error = str(e)
+        logger.error(
+            "Session compaction exhausted retries for user %d (%d turns); "
+            "dead-lettering to Redis. Last error: %s",
+            user_id, len(old_turns), last_error,
+        )
+
+    # Dead-letter the raw turns so they can be recovered later.
+    try:
+        r = await get_redis()
+        dlq_key = _compaction_dlq_key(user_id)
+        await r.rpush(dlq_key, json.dumps({
+            "old_turns": old_turns,
+            "failed_at": time.time(),
+            "error": (last_error or "")[:500],
+        }))
+        await r.expire(dlq_key, _COMPACT_DLQ_TTL)
+    except Exception as dlq_err:  # pragma: no cover — last-ditch
+        logger.critical(
+            "Compaction DLQ write also failed for user %d: %s — "
+            "%d turns LOST",
+            user_id, dlq_err, len(old_turns),
+        )
 
 
 async def archive_session(user_id: int) -> Optional[str]:

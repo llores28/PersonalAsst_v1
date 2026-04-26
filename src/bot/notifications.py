@@ -178,3 +178,85 @@ async def notify_low_risk_applied(
             await bot.session.close()
     except Exception as exc:
         logger.warning("notify_low_risk_applied failed: %s", exc)
+
+
+# Default dedup TTL: just under the weekly heartbeat cadence so a stuck user
+# gets re-nudged each Monday but never twice within the same week.
+_OAUTH_REAUTH_DEDUP_TTL = 6 * 86400  # 6 days
+
+
+async def notify_oauth_reauth_required(
+    user_telegram_id: int,
+    *,
+    email: Optional[str] = None,
+    dedup_ttl_seconds: int = _OAUTH_REAUTH_DEDUP_TTL,
+) -> bool:
+    """Telegram nudge when the OAuth heartbeat detects a revoked Google token.
+
+    The weekly heartbeat (`weekly_oauth_heartbeat`) classifies a user as
+    `auth_failed` when Google's auto-refresh path returns a permanent error —
+    idle 6-month expiry, password change, scope revoke, or eviction from the
+    100-token-per-client cap. The user must run `/connect google` to re-consent.
+
+    Dedup: a Redis key (`notification_sent:{user_id}:oauth_reauth`) suppresses
+    repeats inside the TTL window. If Redis is unreachable, we still send
+    rather than fail closed — a duplicate nudge is preferable to a silent
+    auth failure on a critical-path integration.
+
+    Returns:
+        True if a Telegram message was sent, False if dedup-suppressed or the
+        send itself failed (logged).
+    """
+    dedup_key = f"notification_sent:{user_telegram_id}:oauth_reauth"
+    redis = None
+    try:
+        from src.memory.conversation import get_redis
+        redis = await get_redis()
+        if await redis.exists(dedup_key):
+            logger.info(
+                "OAuth reauth nudge for user %s suppressed by dedup key",
+                user_telegram_id,
+            )
+            return False
+    except Exception as exc:
+        logger.warning(
+            "OAuth reauth dedup check failed for user %s (will still send): %s",
+            user_telegram_id, exc,
+        )
+        redis = None
+
+    try:
+        account_line = f"\n*Account:* `{email}`" if email else ""
+        text = (
+            "🔐 *Google access needs re-authorization*\n\n"
+            "Atlas's weekly check found your Google connection has expired or "
+            "been revoked. This typically happens after a long idle period, a "
+            "password change, or if access was removed from your Google account."
+            f"{account_line}\n\n"
+            "Restore Gmail / Calendar / Drive access:\n"
+            "`/connect google`"
+        )
+        bot = _get_bot()
+        try:
+            await bot.send_message(
+                chat_id=user_telegram_id,
+                text=text,
+                parse_mode="Markdown",
+            )
+        finally:
+            await bot.session.close()
+    except Exception as exc:
+        logger.warning("notify_oauth_reauth_required failed: %s", exc)
+        return False
+
+    # Only mark as nudged after a successful send so transient bot failures
+    # don't suppress next week's retry.
+    if redis is not None:
+        try:
+            await redis.set(dedup_key, "1", ex=dedup_ttl_seconds)
+        except Exception as exc:
+            logger.warning(
+                "Could not set OAuth reauth dedup key for user %s: %s",
+                user_telegram_id, exc,
+            )
+    return True

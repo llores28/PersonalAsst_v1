@@ -90,7 +90,12 @@ class _User:
 
 
 @pytest.mark.asyncio
-async def test_cmd_orgs_create_starts_wizard() -> None:
+async def test_cmd_orgs_create_redirects_to_neworg() -> None:
+    """`/orgs create` no longer launches the multi-step session-field wizard;
+    it now points users to the AI-powered single-shot `/neworg <goal>` flow.
+    The test asserts the redirect message is sent and no session state is
+    written (the old wizard's set_session_field("org_creation_*", ...) calls
+    must not fire)."""
     from src.bot.handlers import cmd_orgs
 
     fake_session = _FakeSession(execute_values=[SimpleNamespace(id=77)])
@@ -129,8 +134,12 @@ async def test_cmd_orgs_create_starts_wizard() -> None:
     ):
         await cmd_orgs(message)
 
-    assert mock_set_field.await_count == 2
-    assert any("Organization Creation Wizard" in call.args[0] for call in message.answer.await_args_list)
+    # No session-state writes — the wizard moved to a single-shot /neworg call.
+    assert mock_set_field.await_count == 0
+    # User is redirected to /neworg.
+    answer_texts = [call.args[0] for call in message.answer.await_args_list]
+    assert any("/neworg" in text for text in answer_texts)
+    assert any("AI-Powered Organization Wizard" in text for text in answer_texts)
 
 
 @pytest.mark.asyncio
@@ -164,6 +173,8 @@ async def test_handle_message_org_wizard_description_creates_org_and_clears_stat
     message = SimpleNamespace(
         text="skip",
         voice=None,
+        photo=None,  # handle_message branches on message.photo before reaching the org wizard
+        caption=None,
         from_user=SimpleNamespace(id=12345),
         answer=AsyncMock(),
     )

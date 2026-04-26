@@ -7,7 +7,12 @@ scheduling bridge, and tool creation bridge.
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Ensure agents package is available for import even without the real SDK
+# If the real openai-agents SDK isn't installed, install a minimal stand-in
+# so ``from agents import ...`` works at import time. The runtime decorator
+# behavior (function_tool unwrap) is handled per-call inside ``_get_tools`` so
+# tests work regardless of which test imports `agents` first when the full
+# suite runs (test isolation: previously, an earlier test pulling in the real
+# SDK left FunctionTool objects in our tools list, breaking direct invocation).
 if "agents" not in sys.modules:
     from typing import Generic, TypeVar
     _T = TypeVar("_T")
@@ -16,15 +21,26 @@ if "agents" not in sys.modules:
         """Subscriptable stand-in for RunContextWrapper."""
         pass
 
-    _mock_agents = MagicMock()
-    # Make function_tool act as a passthrough decorator that accepts kwargs
     def _mock_function_tool(fn=None, **kwargs):
         if fn is not None:
             return fn
         return lambda f: f
+
+    _mock_agents = MagicMock()
     _mock_agents.function_tool = _mock_function_tool
     _mock_agents.RunContextWrapper = _FakeRunContextWrapper
     sys.modules["agents"] = _mock_agents
+
+
+def _passthrough_function_tool(fn=None, **kwargs):
+    """A no-op stand-in for `agents.function_tool` so `_build_bound_org_tools`
+    returns bare async functions that the tests can call directly. Patched in
+    `_get_tools` and only active for that single build, so it doesn't pollute
+    other code that legitimately needs the real SDK decorator."""
+    if fn is not None:
+        return fn
+    return lambda f: f
+
 
 import pytest
 
@@ -84,7 +100,32 @@ class TestOrganizationSkillDefinition:
         skill = build_organization_skill(user_id=42)
         assert skill.id == "organizations"
         assert skill.group == SkillGroup.INTERNAL
-        assert len(skill.tools) == 14
+        # Count is asserted to catch accidental adds/removes. Update both this
+        # number and the explicit name list below when the canonical tool set
+        # in src/agents/org_agent.py:_build_bound_org_tools changes.
+        expected_tools = {
+            "list_organizations",
+            "find_organization",
+            "create_organization",
+            "update_organization",
+            "get_organization_status",
+            "add_org_agent",
+            "add_org_task",
+            "assign_org_task",
+            "complete_org_task",
+            "list_org_tasks",
+            "schedule_org_task",
+            "list_org_schedules",
+            "cancel_org_schedule",
+            "create_org_tool",
+            "setup_org_project",
+        }
+        # Tools may be plain async functions OR @function_tool-decorated
+        # objects depending on whether the SDK is fully importable in this
+        # env — fall back to __name__ for the bare-function case.
+        actual_tools = {getattr(t, "name", None) or t.__name__ for t in skill.tools}
+        assert actual_tools == expected_tools
+        assert len(skill.tools) == len(expected_tools)
         assert skill.read_only is False
 
     def test_skill_has_routing_hints(self) -> None:
@@ -481,9 +522,20 @@ class TestCreateOrgTool:
 # ---------------------------------------------------------------------------
 
 def _get_tools() -> dict:
-    """Build org tools and return as dict keyed by function name."""
+    """Build org tools and return as dict keyed by function name.
+
+    Patches `src.agents.org_agent.function_tool` to a passthrough so the
+    `@function_tool(...)` decoration inside `_build_bound_org_tools` is a no-op
+    for this call — the inner async functions come back unwrapped and directly
+    awaitable. Without this patch, when the real openai-agents SDK is loaded
+    (which happens whenever some other test imports it before us in the same
+    pytest session), the decorator wraps each tool in a `FunctionTool` object
+    that isn't directly callable, causing every CRUD test to raise
+    `TypeError: 'FunctionTool' object is not callable`.
+    """
     from src.agents.org_agent import _build_bound_org_tools
-    tools = _build_bound_org_tools(user_id=42)
+    with patch("src.agents.org_agent.function_tool", _passthrough_function_tool):
+        tools = _build_bound_org_tools(user_id=42)
     return {getattr(t, "name", getattr(t, "__name__", str(i))): t for i, t in enumerate(tools)}
 
 

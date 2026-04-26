@@ -31,7 +31,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_store_credential(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import store_credential
 
             await store_credential("linkedin", "email", "test@example.com")
@@ -41,7 +41,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_store_credentials_bulk(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import store_credentials
 
             creds = {"email": "test@example.com", "password": "secret"}
@@ -52,7 +52,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_store_credentials_empty(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import store_credentials
 
             await store_credentials("linkedin", {})
@@ -60,7 +60,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_get_credential(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import get_credential
 
             val = await get_credential("linkedin", "email")
@@ -71,7 +71,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_get_credentials(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import get_credentials
 
             creds = await get_credentials("linkedin")
@@ -80,7 +80,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_delete_credential(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import delete_credential
 
             await delete_credential("linkedin", "email")
@@ -90,7 +90,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_delete_all_credentials(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import delete_all_credentials
 
             await delete_all_credentials("linkedin")
@@ -98,7 +98,7 @@ class TestCredentialVault:
 
     @pytest.mark.asyncio
     async def test_list_credential_keys(self, mock_redis):
-        with patch("src.tools.credentials._get_redis", return_value=mock_redis):
+        with patch("src.tools.credentials.get_redis", new=AsyncMock(return_value=mock_redis)):
             from src.tools.credentials import list_credential_keys
 
             keys = await list_credential_keys("linkedin")

@@ -1,11 +1,26 @@
 """Tests for Agents Tab API endpoints."""
 
+import importlib.util
+
 import pytest
 from datetime import datetime, timezone
 
 from src.orchestration.system_agents import get_system_agents, get_system_agent_by_id, get_agents_by_category
 from src.orchestration.agent_registry import Organization, OrgAgent, OrgTask, OrgActivity
 from src.db.models import User
+
+
+# The orchestration API ships in a separate container (Dockerfile.orchestration
+# / requirements-orchestration.txt) with its own deps, including fastapi. The
+# bot venv intentionally does NOT install fastapi. Tests that import api.py
+# (which has a top-level `from fastapi import ...`) must skip gracefully when
+# fastapi is absent. To run the full dashboard test suite locally:
+#     pip install -r requirements-orchestration.txt
+_HAS_FASTAPI = importlib.util.find_spec("fastapi") is not None
+_requires_fastapi = pytest.mark.skipif(
+    not _HAS_FASTAPI,
+    reason="fastapi not installed (install requirements-orchestration.txt to run)",
+)
 
 
 class TestSystemAgentsRegistry:
@@ -55,6 +70,7 @@ class TestSystemAgentsRegistry:
             assert agent.category == "internal"
 
 
+@_requires_fastapi
 class TestOrgAgentWithOrgInfo:
     """Tests for OrgAgentWithOrgInfo model validation."""
 
@@ -98,6 +114,7 @@ class TestOrgAgentWithOrgInfo:
         assert "Test Org" in agent.delete_reason
 
 
+@_requires_fastapi
 class TestAgentDeletionCheck:
     """Tests for AgentDeletionCheck model."""
 

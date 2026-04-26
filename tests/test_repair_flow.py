@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -125,28 +125,24 @@ class TestRepairApprovalFlow:
         with (
             patch.object(engine, "get_pending_repair", new=AsyncMock(return_value=payload)),
             patch.object(engine, "clear_pending_repair", new=AsyncMock()) as mock_clear,
-            patch.object(engine, "_write_patch_file", new=AsyncMock(return_value="repair.patch")),
-            patch.object(engine, "_maybe_trigger_deploy", new=AsyncMock(return_value=None)),
-            patch.object(
-                engine,
-                "_run_command_parts",
-                new=AsyncMock(
-                    side_effect=[
-                        (0, "main\n", ""),       # git rev-parse HEAD
-                        (0, "", ""),              # git apply --check
-                        (0, "", ""),              # git checkout -b repair/...
-                        (0, "", ""),              # git apply
-                        (0, "", ""),              # git add
-                        (0, "", ""),              # git commit
-                        (0, "ok", ""),            # verification command
-                        (0, "", ""),              # git checkout main (back to original)
-                    ]
-                ),
-            ),
+            patch.object(engine, "_apply_unified_diff", return_value=(True, "", {})),
+            patch.object(engine, "_run_verification_commands", new=AsyncMock(return_value=[])),
+            patch.object(engine, "_notify_fix_ready_async", new=AsyncMock(return_value=None)),
+            patch("asyncio.create_task"),
         ):
-            result = await engine.execute_pending_repair(123)
+            with patch("src.db.session.async_session") as mock_session_cls:
+                mock_session = AsyncMock()
+                mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+                mock_session.__aexit__ = AsyncMock(return_value=False)
+                mock_session.execute = AsyncMock(return_value=AsyncMock(scalar_one_or_none=lambda: None))
+                mock_session.get = AsyncMock(return_value=None)
+                mock_session.add = MagicMock()
+                mock_session.commit = AsyncMock()
+                mock_session.refresh = AsyncMock()
+                mock_session_cls.return_value = mock_session
+                result = await engine.execute_pending_repair(123)
 
-        assert "Patch Verified" in result or "ready" in result.lower()
+        assert "Patch Applied Successfully" in result
         assert "src/example.py" in result
         mock_clear.assert_awaited_once_with(123)
 
@@ -187,7 +183,7 @@ class TestRepairApprovalFlow:
 
         assert result is not None
         assert "Configure security first." in result
-        assert "/settings security" in result
+        assert "/security pin" in result
 
     @pytest.mark.asyncio
     async def test_maybe_handle_pending_repair_executes_after_verification(self) -> None:

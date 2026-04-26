@@ -96,6 +96,24 @@ services:
       - qdrant_data:/qdrant/storage
 
   # ─── Google Workspace MCP Server ───
+  #
+  # Persistence configuration (added 2026-04-26):
+  # The upstream image's Linux defaults make tokens look persistent but they
+  # aren't:
+  #   - WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND defaults to "memory" — proxy
+  #     state is wiped on container restart, forcing every connected user
+  #     back through `/connect google` after every rebuild.
+  #   - WORKSPACE_MCP_CREDENTIALS_DIR defaults to ~/.google_workspace_mcp/...
+  #     which lives on the container's writable layer (not our volume).
+  #   - The Fernet key used to encrypt persisted tokens defaults to a value
+  #     derived from GOOGLE_OAUTH_CLIENT_SECRET — fine until you rotate it,
+  #     after which the previously-encrypted tokens become unreadable.
+  #
+  # We pin all three explicitly so the named `workspace_tokens` volume actually
+  # holds the data, the disk backend is on, and the Fernet key is independent
+  # of the OAuth client secret. This closes the heartbeat-induced false-positive
+  # nudge storm that would otherwise hit every user on `docker compose up
+  # --build` (see docs/RUNBOOK.md and src/scheduler/maintenance.py).
   workspace-mcp:
     image: ghcr.io/taylorwilsdon/google_workspace_mcp:latest
     container_name: workspace-mcp
@@ -105,8 +123,19 @@ services:
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
       - GOOGLE_OAUTH_REDIRECT_URI=http://127.0.0.1:8083/oauth2callback
       - OAUTHLIB_INSECURE_TRANSPORT=1
+      # Fernet signing key. Generate ONCE with `openssl rand -hex 32`
+      # and store in .env. NEVER rotate without first re-issuing /connect
+      # google to all users — rotation invalidates every persisted token.
+      - FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY=${WORKSPACE_MCP_SIGNING_KEY:-}
+      # Force the disk backend so OAuth-proxy state survives restarts.
+      - WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND=disk
+      - WORKSPACE_MCP_OAUTH_PROXY_DISK_DIRECTORY=/data/oauth-proxy
+      # Pin the credentials dir to the same volume so encrypted token JSON
+      # files land where we mount, not on the container's writable layer.
+      - WORKSPACE_MCP_CREDENTIALS_DIR=/data/credentials
     volumes:
-      - workspace_tokens:/data/tokens
+      # Named volume covers BOTH /data/credentials and /data/oauth-proxy.
+      - workspace_tokens:/data
       - ./src/integrations/workspace_mcp_oauth_responses_override.py:/app/auth/oauth_responses.py:ro
     ports:
       - "127.0.0.1:8083:8000"

@@ -165,6 +165,13 @@ class TestSchedulerSyncRegression:
             trigger_config={"once": {"run_at": "2026-04-10T19:30:00Z"}},
             user_id=42,
             description="One-shot reminder",
+            # `sync_tasks_from_db` reads several attributes off each row:
+            # is_active (active filter), job_function / job_args (callable +
+            # kwargs forwarded to add_*_job). All are required for the path
+            # under test to reach `added.append(...)`.
+            is_active=True,
+            job_function="src.scheduler.jobs.send_reminder",
+            job_args=None,
         )
 
         class _FakeResult:

@@ -1,5 +1,148 @@
 # Changelog
 
+## 2026-04-26 — ADR backfill (6 new architecture decision records)
+
+Captured the *why* behind today's substantial design decisions before the context faded. Each ADR follows the project format (Context / Decision / Consequences / Alternatives Considered) and links to the relevant source files.
+
+- [ADR-2026-04-26-oauth-heartbeat-and-reauth-nudge](ADR-2026-04-26-oauth-heartbeat-and-reauth-nudge.md) — why weekly Mon 09:00 UTC, why 3-bucket classification, why bracketed-tag detection over HTTP codes, why a 6-day dedup TTL (not 7), why fail-open on Redis.
+- [ADR-2026-04-26-workspace-mcp-token-persistence](ADR-2026-04-26-workspace-mcp-token-persistence.md) — the three upstream defaults (`memory` proxy backend, home-dir credentials path, `GOOGLE_OAUTH_CLIENT_SECRET`-derived Fernet key) that conspired to drop tokens on rebuild, and why we pinned all three explicitly.
+- [ADR-2026-04-26-memory-eviction-with-summary-distillation](ADR-2026-04-26-memory-eviction-with-summary-distillation.md) — the 0.45/0.25/0.30 generative-agents scoring formula, the 30-day half-life, the two-phase write-summaries-before-delete pipeline, and why summaries are protected from re-eviction.
+- [ADR-2026-04-26-workspace-rate-limit-handling](ADR-2026-04-26-workspace-rate-limit-handling.md) — the two-layer wrapper that lets tenacity see only retryable exceptions while keeping the public `call_workspace_tool` string-only, plus the conservative pattern set for rate-limit detection.
+- [ADR-2026-04-26-session-compaction-dlq](ADR-2026-04-26-session-compaction-dlq.md) — why we never silently drop conversation context, the Redis-list DLQ design (`compaction_dlq:{user_id}`, 7-day TTL), and the `last_error` scope-leak workaround.
+- [ADR-2026-04-26-scheduler-observability](ADR-2026-04-26-scheduler-observability.md) — single `JobReleased` listener over per-job instrumentation, pure-function `_apply_event` for testability, why Redis (not Postgres) for `scheduler_health:*` records, and why the listener must never raise.
+
+These bring the docs/ ADR count from 17 to 23.
+
+## 2026-04-26 — Workspace-MCP token persistence (close OAuth heartbeat false-positive footgun)
+
+### Why this exists
+The OAuth heartbeat shipped earlier today nudges every `auth_failed` user to run `/connect google`. That's the right behavior — *unless* the auth failure was caused by us, not Google. Three default settings in the upstream `taylorwilsdon/google_workspace_mcp` image conspired to silently drop every persisted token on container rebuild:
+
+1. **Linux default for `WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND` is `memory`** — proxy state evaporates on restart, not just rebuild.
+2. **`WORKSPACE_MCP_CREDENTIALS_DIR` defaults to `~/.google_workspace_mcp/credentials`** — this lives on the container's writable layer, not in our `workspace_tokens` named volume. The volume mount at `/data/tokens` was effectively unused.
+3. **The Fernet token-encryption key is derived from `GOOGLE_OAUTH_CLIENT_SECRET` if `FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY` is unset** — silent token loss on any OAuth client-secret rotation.
+
+Without these pinned, `docker compose up --build` would (a) wipe every user's tokens and (b) trigger Mon 09:00 UTC nudges to all of them — looking exactly like a mass Google revocation event.
+
+### Changed — [docker-compose.yml](../docker-compose.yml)
+- Mount the `workspace_tokens` named volume at `/data` (was `/data/tokens`) so it covers both the credentials dir and the OAuth-proxy state dir.
+- Pinned env vars on the workspace-mcp service:
+  - `WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND=disk`
+  - `WORKSPACE_MCP_OAUTH_PROXY_DISK_DIRECTORY=/data/oauth-proxy`
+  - `WORKSPACE_MCP_CREDENTIALS_DIR=/data/credentials`
+  - `FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY=${WORKSPACE_MCP_SIGNING_KEY:-}`
+- Inline comment block on the service explains the why (so the next person doesn't "clean up" what looks like a redundant config).
+
+### Added — [scripts/ensure_workspace_mcp_key.py](../scripts/ensure_workspace_mcp_key.py)
+Idempotent bootstrap helper. Reads `.env`, looks for `WORKSPACE_MCP_SIGNING_KEY`. If missing or empty, generates a 64-char hex key via `secrets.token_hex(32)` and writes it (preserving every other line). If present and non-empty, prints a one-line summary and exits cleanly. Tested against missing/present/empty cases — all idempotent.
+
+### Added — [.env.example](../.env.example)
+`WORKSPACE_MCP_SIGNING_KEY` entry with a generation comment + warning never to rotate without re-issuing `/connect google` (rotation invalidates persisted tokens).
+
+### Added — [docs/RUNBOOK.md](RUNBOOK.md) "Workspace-MCP token persistence" section
+- Table of the four pinned settings + rationale.
+- First-time setup steps (`cp .env.example .env` → `python scripts/ensure_workspace_mcp_key.py` → `docker compose up -d`).
+- Recovery procedures for: lost `.env`, deleted volume (`docker compose down -v`), and a verification command that exercises the round-trip via `weekly_oauth_heartbeat()`.
+
+### Verification
+- `docker compose config --quiet` exits 0 (compose syntax + interpolation valid).
+- Bootstrap script tested with three cases (missing var, present-and-empty var, present-and-set var). Idempotent in all three.
+
+### Migration note
+Existing deployments need a one-time `python scripts/ensure_workspace_mcp_key.py` and a `docker compose up -d --build`. After that, `/connect google` once per connected user (their old tokens were on the container's writable layer and are gone). The Mon 09:00 UTC heartbeat will catch users that haven't reconnected and nudge them automatically.
+
+## 2026-04-26 — Test suite green (47 → 0 failures)
+
+After the org-agent batch closed 35, this round closed the remaining 12 — most were content-drift assertions, two were real test issues, and one revealed a subtle global-state pollution.
+
+### Fixed — Real test isolation issue (1 test)
+- `test_pipeline_returns_needs_revision_when_qa_requests_it`: every `TestSelfHealingPipeline` test calls `run_self_healing_pipeline(user_telegram_id=12345, error_description="Test error")` — same fingerprint. The pipeline's in-memory `_PIPELINE_ATTEMPT_COUNTS` accumulates across tests in the same session, so by the third test the counter hit `_PIPELINE_MAX_ATTEMPTS` and the assertion got `MAX_RETRIES_EXCEEDED` instead of `NEEDS_REVISION`. Added an autouse fixture that clears the counter before *and* after each test in the file, making test ordering irrelevant.
+
+### Fixed — Stale assertions / drift (8 tests)
+- `test_audit_fixes.py::test_cost_pricing_uses_model_keyed_lookup`: pricing extracted out of `orchestrator.py` into `src/models/cost_tracker.py` and renamed `_MODEL_PRICING` → `OPENAI_MODEL_PRICING`. Test now follows the canonical location and also asserts the old block doesn't return to orchestrator.py.
+- `test_main.py::test_run_migrations_upgrades_head_when_enabled`: alembic config moved `alembic.ini` → `src/alembic.ini`.
+- `test_model_router.py::test_coding_xhigh_returns_codex`: `gpt-5.3-codex` retired from the live routing matrix; `CODING+XHIGH` now routes to `gpt-5.4` (a reasoning model). Renamed and updated.
+- `test_model_router.py::test_non_reasoning_model_has_none_effort`: same retirement removed the only non-reasoning routing-matrix output. Rewrote to mock `settings.model_general` to `gpt-4o` (intentionally absent from `_REASONING_MODELS`) so the invariant ("non-reasoning model → effort=None") still has coverage.
+- `test_skill_registry.py::test_frozen_prevents_mutation`: `SkillDefinition` is intentionally a regular `@dataclass` (not frozen) — the dashboard skill-edit endpoint at [src/orchestration/api.py:4573](../src/orchestration/api.py#L4573) mutates `name`/`description`/`tags` in place. Renamed the test to `test_skill_definition_is_mutable` and pinned the contract.
+- `test_skill_registry.py::test_list_skills_returns_metadata`: `metadata_dict()` no longer exposes `tool_count` (Level-1 metadata is intentionally tool-agnostic). Updated the test to spot-check the real Level-1 keys (`name`, `description`, `version`, `is_active`).
+- `test_tools.py::test_create_tool_factory_agent`: factory grew from 3 to 5 tools (`generate_http_tool` + `get_org_catalog` for live model/pricing lookups). Replaced bare count check with explicit name set.
+- `test_tools.py::test_instructions_contain_decision_tree`: instructions restructured. Test now asserts section headers + the four canonical tool categories (CLI / HTTP API / function_tool / specialist) instead of pinning specific copy.
+
+### Fixed — Mock setup (3 tests)
+- `test_scheduler.py::test_sync_one_shot_normalizes_run_at_to_iso_string`: the `SimpleNamespace` task mock was missing `is_active`, `job_function`, `job_args` — `sync_tasks_from_db` reads all three. Without them, the inner `except` swallowed an `AttributeError` and the row never reached `added.append(...)`.
+- `test_integrated_pipeline.py::test_dry_run_reports_failed_patch`: `_dry_run_patch` migrated from `git apply --check` (subprocess) to a pure-Python read-only hunk-context simulation. The old test mocked `_run_command_parts`, which is no longer called. Rewrote to feed a real diff against `requirements.txt` with deliberately bogus context — the parser detects the mismatch and returns "Patch does not apply cleanly to requirements.txt: ...".
+- `test_integrated_pipeline.py::test_sandbox_test_success`: `_run_sandbox_test` matches success against the EXACT marker substring "Patch Verified in Sandbox" (not just "Patch Verified"). The mock return string was too short — extended to `"✅ Patch Verified in Sandbox - Awaiting Deploy Approval"`.
+
+### Verification
+- **Full suite: 1096 passed / 0 failed / 6 skipped / 7 xfailed.** Down from 47 failed at the start of today's session. The 6 skipped are the fastapi-conditional dashboard-API tests (intentional — `requirements-orchestration.txt` not in the bot venv); the 7 xfailed are the calibration-gap parametrizations from `TestMessageComplexityClassifier` (also intentional).
+
+## 2026-04-26 — Org-agent test suite cleanup (35 fewer failures)
+
+### Fixed — `test_org_agent.py` FunctionTool isolation pollution (27 tests)
+- Root cause: the test file installs a passthrough `function_tool` mock only `if "agents" not in sys.modules`. In the full suite, an earlier test imports the real openai-agents SDK first, the conditional skips, and the real `function_tool` decorator produces `FunctionTool` objects that are NOT directly callable. Result: every CRUD test raised `TypeError: 'FunctionTool' object is not callable` — but only when run as part of the suite, not in isolation.
+- Fix: scope the passthrough to the call site. `_get_tools()` now patches `src.agents.org_agent.function_tool` with a no-op decorator just for the `_build_bound_org_tools()` build, then restores it. The keep-the-mock-around-just-in-case `if "agents" not in sys.modules` guard remains for the import-time stub but no longer determines runtime decorator behavior.
+- Now all 33 org-agent tests pass regardless of test ordering.
+
+### Fixed — `test_skill_creation` tool count drift (1 test)
+- The org skill grew `setup_org_project` to 15 tools but the test still asserted 14. Bumped and replaced the bare count check with an explicit name set so future drift fails with a useful diff instead of a number mismatch.
+
+### Fixed — `test_agents_api.py` fastapi-optional skip (4 tests)
+- 4 model-validation tests imported `src.orchestration.api`, which has a top-level `from fastapi import ...`. fastapi only ships in the orchestration container (`requirements-orchestration.txt`), not the bot venv. Tests now skip cleanly via `pytest.mark.skipif(importlib.util.find_spec("fastapi") is None)` instead of failing — install `requirements-orchestration.txt` to run them.
+
+### Fixed — `test_bot_orgs_handlers.py` (2 tests)
+- `test_cmd_orgs_create_starts_wizard` was testing a removed multi-step session-field wizard. The `/orgs create` flow now redirects to the AI-powered `/neworg <goal>` single-shot. Test rewritten to assert the redirect message is sent and `set_session_field` is NOT called (renamed to `test_cmd_orgs_create_redirects_to_neworg`).
+- `test_handle_message_org_wizard_description_creates_org_and_clears_state` failed on `message.photo` access because the mock SimpleNamespace was missing that attribute. Added `photo=None` and `caption=None` to the mock to match `handle_message`'s feature-detection branches.
+
+### Verification
+- Full suite: **1084 passed / 12 failed / 6 skipped / 7 xfailed** (was 1053 / 47 / 2 / 7 at the start of this session). **35 fewer failures, 31 more passing tests, zero regressions.** Remaining 12 failures are unrelated content/contract drift (skill-frozen contract, tool-factory instructions string, model-router edge cases) — not part of this batch.
+
+## 2026-04-26 — OAuth heartbeat: Telegram re-consent nudge
+
+### Added — `notify_oauth_reauth_required` in [src/bot/notifications.py](../src/bot/notifications.py)
+- New helper sends a Telegram message asking the user to run `/connect google` when their token has been revoked. Includes the connected email when available.
+- Redis-backed dedup: `notification_sent:{user_id}:oauth_reauth` with a 6-day TTL — short enough that a stuck user gets re-nudged on the next Monday heartbeat, long enough that ad-hoc heartbeat re-runs in the same week don't spam.
+- Fail-open semantics: if Redis is unreachable, the nudge still goes out (a duplicate is preferable to silent auth failure on a critical-path integration). The dedup key is only set after a *successful* Telegram send so transient bot failures don't suppress next week's retry.
+
+### Wired — `weekly_oauth_heartbeat` now calls the nudge for `auth_failed` users
+- Heartbeat report grew `users_nudged: int` and per-detail `nudge_sent: bool`.
+- Nudge dispatch is isolated in `_send_reauth_nudge` (best-effort email lookup from `google_email:{user_id}` Redis key, then `notify_oauth_reauth_required`); never raises into the batch loop.
+- Closes the OAuth heartbeat detection→notification loop: revoked tokens are now visible to the user, not just to logs.
+
+### Tests — 8 new (6 helper + 2 heartbeat-integration)
+- `tests/test_repair_notifications.py::TestNotifyOauthReauthRequired` — sends-when-no-key, dedup-suppresses, redis-unavailable-still-sends, failed-send-doesn't-set-key, swallows-bot-init-failure, no-email-fallback.
+- `tests/test_scheduler_oauth_heartbeat.py` — added `test_auth_failure_calls_telegram_nudge_with_correct_id` and `test_auth_failure_with_failed_nudge_still_reports`. Existing tests updated to mock `_send_reauth_nudge` and assert the new `users_nudged` counter / `nudge_sent` field.
+
+### Verification
+- 21/21 scoped tests pass on first run (`tests/test_repair_notifications.py::TestNotifyOauthReauthRequired` + `tests/test_scheduler_oauth_heartbeat.py`).
+- Full suite: 1053 passed / 47 failed / 7 xfailed — failure count unchanged (zero regressions). The 47 failing tests are the pre-existing org-agent / tool-count / skill-frozen / model-router backlog, none touched by this change.
+
+## 2026-04-25 — Nexus toolkit upgrade (upstream `65b60ff`)
+
+### Upgraded — Nexus CLI toolkit synced to latest upstream
+- Pulled [llores28/Nexus](https://github.com/llores28/Nexus) `main` into the embedded clone at `bootstrap/Nexus/` (was `70b6e6e`, now `65b60ff` — 16 commits forward).
+- Local `bootstrap/cli/` already carried the post-Mar-24 cherry-picks (`health.py`, `supply_chain.py`); the existing tools required no logic refresh — upstream's only changes to them were the `bootstrap.cli.*` → `nexus.cli.*` import-path rename done as part of upstream commit `7ca6023`. The local layout intentionally **stays at `bootstrap/cli/`** to avoid rippling the rename through CLAUDE.md / AGENTS.md / .windsurf rules / .github / docs / 50+ doc references.
+
+### Added — `journal` subcommand (cross-session state tracking)
+- `bootstrap/cli/tools/journal.py` and `bootstrap/cli/tools/journal_dashboard.py` — ported from upstream `nexus/cli/tools/`, with imports and git-hook templates rewritten for the local `bootstrap/cli/bs_cli.py` path.
+- Subcommands: `session-start`, `session-end`, `log`, `status`, `diff`, `export`, `setup-hooks`.
+- State stored at `.nexus/state.json` and rendered to `.nexus/state.md`. Dashboard exports to `.nexus/state-dashboard.html` (self-contained, no CDN).
+- Optional git hooks (`post-commit` auto-logs, `pre-push` regenerates dashboard) via `journal setup-hooks`. Not auto-installed.
+
+### Bumped — CLI version 0.1.0 → 0.2.0
+- `python bootstrap/cli/bs_cli.py --version` now reports `bs-cli, version 0.2.0`.
+
+### Skipped from upstream (intentional)
+- The new `init`/`wizard` tools (upstream `390eb6a`/`65b60ff`) — they target *fresh* project bootstrap; PersonalAsst is already bootstrapped.
+- The `bootstrap/` → `nexus/` directory rename (upstream `7ca6023`) — staying on `bootstrap/cli/` to keep doc references valid. Documented in [bootstrap/README.md](../bootstrap/README.md).
+
+### Verification
+- `bs_cli.py --version` → `0.2.0`. ✓
+- `bs_cli.py --help` → lists `journal` alongside the existing 9 commands. ✓
+- `bs_cli.py journal status --format json` → emits structured result. ✓
+- `bs_cli.py journal diff --format json` → detects changed files via git. ✓
+- `bs_cli.py prereqs --format json` → no regression. ✓
+- `bs_cli.py health check --format json` → no regression (pre-existing 72/100 score unchanged). ✓
+
 ## 2026-04-23 — Repair Workflow: File-Type Aware Verification
 
 ### Fixed — Verification ran wrong tool for the file type

@@ -1409,6 +1409,8 @@ async def _run_sandbox_test(
             "Patch Verified in Sandbox",
             "Awaiting Deploy Approval",
             "ready_for_deploy",
+            "✅ Patch Applied Successfully",
+            "Patch Applied Successfully",
         )
         if any(marker in result for marker in _SUCCESS_MARKERS):
             return {"success": True, "result": result}

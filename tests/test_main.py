@@ -30,5 +30,5 @@ class TestRunMigrations:
         ):
             await main.run_migrations()
 
-        mock_config.assert_called_once_with("alembic.ini")
+        mock_config.assert_called_once_with("src/alembic.ini")
         mock_upgrade.assert_called_once_with("fake_cfg", "head")

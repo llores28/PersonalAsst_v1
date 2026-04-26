@@ -136,6 +136,146 @@ class TestNotifyLowRiskApplied:
         assert "Cleared Redis key" in text
 
 
+class TestNotifyOauthReauthRequired:
+    @pytest.mark.asyncio
+    async def test_sends_nudge_when_no_dedup_key(self, monkeypatch) -> None:
+        from src.bot.notifications import notify_oauth_reauth_required
+
+        fake_redis = AsyncMock()
+        fake_redis.exists = AsyncMock(return_value=0)  # no prior nudge
+        fake_redis.set = AsyncMock()
+        monkeypatch.setattr(
+            "src.memory.conversation.get_redis",
+            AsyncMock(return_value=fake_redis),
+        )
+
+        mock_bot = AsyncMock()
+        mock_bot.session = AsyncMock()
+        with patch("src.bot.notifications._get_bot", return_value=mock_bot):
+            sent = await notify_oauth_reauth_required(
+                user_telegram_id=12345, email="alice@example.com"
+            )
+
+        assert sent is True
+        mock_bot.send_message.assert_awaited_once()
+        kwargs = mock_bot.send_message.call_args.kwargs
+        assert kwargs["chat_id"] == 12345
+        assert "/connect google" in kwargs["text"]
+        assert "alice@example.com" in kwargs["text"]
+        # Dedup key set with the requested TTL after a successful send.
+        fake_redis.set.assert_awaited_once()
+        set_args = fake_redis.set.call_args
+        assert set_args.args[0] == "notification_sent:12345:oauth_reauth"
+        assert set_args.kwargs.get("ex") == 6 * 86400
+
+    @pytest.mark.asyncio
+    async def test_dedup_key_suppresses_nudge(self, monkeypatch) -> None:
+        from src.bot.notifications import notify_oauth_reauth_required
+
+        fake_redis = AsyncMock()
+        fake_redis.exists = AsyncMock(return_value=1)  # already nudged
+        fake_redis.set = AsyncMock()
+        monkeypatch.setattr(
+            "src.memory.conversation.get_redis",
+            AsyncMock(return_value=fake_redis),
+        )
+
+        mock_bot = AsyncMock()
+        mock_bot.session = AsyncMock()
+        with patch("src.bot.notifications._get_bot", return_value=mock_bot):
+            sent = await notify_oauth_reauth_required(user_telegram_id=12345)
+
+        assert sent is False
+        mock_bot.send_message.assert_not_awaited()
+        fake_redis.set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_redis_unavailable_still_sends_nudge(self, monkeypatch) -> None:
+        # Fail-open: a critical re-consent prompt must not be lost just because
+        # Redis is down. We still deliver the message, just skip the dedup mark.
+        from src.bot.notifications import notify_oauth_reauth_required
+
+        monkeypatch.setattr(
+            "src.memory.conversation.get_redis",
+            AsyncMock(side_effect=ConnectionError("redis down")),
+        )
+
+        mock_bot = AsyncMock()
+        mock_bot.session = AsyncMock()
+        with patch("src.bot.notifications._get_bot", return_value=mock_bot):
+            sent = await notify_oauth_reauth_required(user_telegram_id=12345)
+
+        assert sent is True
+        mock_bot.send_message.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_dedup_key_not_set_if_send_fails(self, monkeypatch) -> None:
+        # If Telegram send fails, we must NOT set the dedup key — otherwise the
+        # user gets no nudge AND no retry next week.
+        from src.bot.notifications import notify_oauth_reauth_required
+
+        fake_redis = AsyncMock()
+        fake_redis.exists = AsyncMock(return_value=0)
+        fake_redis.set = AsyncMock()
+        monkeypatch.setattr(
+            "src.memory.conversation.get_redis",
+            AsyncMock(return_value=fake_redis),
+        )
+
+        mock_bot = AsyncMock()
+        mock_bot.session = AsyncMock()
+        mock_bot.send_message = AsyncMock(side_effect=RuntimeError("telegram down"))
+        with patch("src.bot.notifications._get_bot", return_value=mock_bot):
+            sent = await notify_oauth_reauth_required(user_telegram_id=12345)
+
+        assert sent is False
+        fake_redis.set.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_swallows_get_bot_exception(self, monkeypatch) -> None:
+        # _get_bot raising must not propagate (defensive — bot init can fail
+        # in test envs without a token).
+        from src.bot.notifications import notify_oauth_reauth_required
+
+        fake_redis = AsyncMock()
+        fake_redis.exists = AsyncMock(return_value=0)
+        monkeypatch.setattr(
+            "src.memory.conversation.get_redis",
+            AsyncMock(return_value=fake_redis),
+        )
+
+        with patch(
+            "src.bot.notifications._get_bot",
+            side_effect=RuntimeError("no token"),
+        ):
+            sent = await notify_oauth_reauth_required(user_telegram_id=12345)
+
+        assert sent is False
+
+    @pytest.mark.asyncio
+    async def test_no_email_falls_back_to_generic_message(self, monkeypatch) -> None:
+        from src.bot.notifications import notify_oauth_reauth_required
+
+        fake_redis = AsyncMock()
+        fake_redis.exists = AsyncMock(return_value=0)
+        fake_redis.set = AsyncMock()
+        monkeypatch.setattr(
+            "src.memory.conversation.get_redis",
+            AsyncMock(return_value=fake_redis),
+        )
+
+        mock_bot = AsyncMock()
+        mock_bot.session = AsyncMock()
+        with patch("src.bot.notifications._get_bot", return_value=mock_bot):
+            sent = await notify_oauth_reauth_required(user_telegram_id=12345)
+
+        assert sent is True
+        text = mock_bot.send_message.call_args.kwargs["text"]
+        # No "Account:" line when email isn't known.
+        assert "Account:" not in text
+        assert "/connect google" in text
+
+
 # ── Email notification helpers ───────────────────────────────────────────
 
 class TestSendTicketCreatedEmail:

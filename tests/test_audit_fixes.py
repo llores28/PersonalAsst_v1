@@ -143,20 +143,33 @@ def test_routing_matrix_models_are_known_gpt5():
 # ── BUG-4 / Cost pricing ────────────────────────────────────────────────
 
 def test_cost_pricing_uses_model_keyed_lookup():
-    """Cost tracking in orchestrator.py must use a model-keyed dict, not substring if/elif."""
-    orchestrator_path = Path(__file__).resolve().parents[1] / "src" / "agents" / "orchestrator.py"
-    source = orchestrator_path.read_text(encoding="utf-8")
+    """Cost tracking must use a model-keyed dict, not substring if/elif.
 
-    # Old pattern: `if "mini" in str(_model_id):`
+    The pricing block was extracted out of orchestrator.py into the dedicated
+    `src/models/cost_tracker.py` module — this test follows the canonical
+    location and asserts the same invariant (dict-keyed lookup, key entries
+    for the active mini/nano models).
+    """
+    cost_tracker_path = Path(__file__).resolve().parents[1] / "src" / "models" / "cost_tracker.py"
+    source = cost_tracker_path.read_text(encoding="utf-8")
+
+    # Old anti-pattern: `if "mini" in str(_model_id):`
     assert 'if "mini" in str(_model_id):' not in source, (
-        "Old substring pricing logic still present — should use _MODEL_PRICING dict"
+        "Old substring pricing logic still present — should use OPENAI_MODEL_PRICING dict"
     )
-    # New pattern: _MODEL_PRICING dict must exist
-    assert "_MODEL_PRICING" in source, (
-        "_MODEL_PRICING dict not found in orchestrator.py cost tracking block"
+    # New pattern: model-keyed pricing dict must exist.
+    assert "OPENAI_MODEL_PRICING" in source, (
+        "OPENAI_MODEL_PRICING dict not found in cost_tracker.py"
     )
     assert "gpt-5.4-mini" in source, "gpt-5.4-mini pricing entry missing"
     assert "gpt-5.4-nano" in source, "gpt-5.4-nano pricing entry missing"
+
+    # And orchestrator.py must NOT carry a duplicate pricing block any more.
+    orchestrator_path = Path(__file__).resolve().parents[1] / "src" / "agents" / "orchestrator.py"
+    orchestrator_source = orchestrator_path.read_text(encoding="utf-8")
+    assert 'if "mini" in str(_model_id):' not in orchestrator_source, (
+        "Old substring pricing logic re-introduced into orchestrator.py"
+    )
 
 
 # ── MOD-7 / De-duplicate ────────────────────────────────────────────────

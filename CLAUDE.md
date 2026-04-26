@@ -11,25 +11,28 @@ Primary UX: Telegram. LLM: OpenAI (Responses API). Infra: Docker Compose (Postgr
 ## Stack
 - Python 3.12+, FastAPI, aiogram 3.x, OpenAI Agents SDK
 - Entry (bot): `src/main.py`
-- Entry (CLI toolkit): `bootstrap/cli/bs_cli.py`
+- CLI toolkit: `nexus` command (installed editable from `Nexus/`, source at `Nexus/nexus/cli/bs_cli.py`)
 
 ## Constraints
 - No secrets in output/commits/logs
 - No invented commands — verify from repo files
 - No shell=True, eval(), exec()
-- Validate paths via `bootstrap/cli/security.py:validate_path()`
-- Validate URLs via `bootstrap/cli/security.py:validate_url()`
-- Structured output via `bootstrap/cli/utils.py:emit()`
+- Validate paths via `Nexus/nexus/cli/security.py:validate_path()`
+- Validate URLs via `Nexus/nexus/cli/security.py:validate_url()`
+- Structured output via `Nexus/nexus/cli/utils.py:emit()`
 - Mark uncertainty as `TODO(verify)`
 
 ## Commands
 ```bash
-python bootstrap/cli/bs_cli.py prereqs           # Check prerequisites
-python bootstrap/cli/bs_cli.py smoketest --level quick  # Quick smoke test
-python bootstrap/cli/bs_cli.py debug secrets-scan # Scan for leaked secrets
-python bootstrap/cli/bs_cli.py research docs <q>  # Search docs
-python bootstrap/cli/bs_cli.py scaffold <name>    # Create new CLI tool
-python bootstrap/cli/bs_cli.py health check        # Nexus health check
+nexus prereqs                       # Check prerequisites
+nexus smoketest --level quick       # Quick smoke test
+nexus debug secrets-scan            # Scan for leaked secrets
+nexus research docs <q>             # Search docs
+nexus scaffold <name>               # Create new CLI tool
+nexus health check                  # Nexus health check (target: 100/100)
+nexus journal status                # Project state dashboard
+nexus journal health                # Drift / staleness diagnosis
+nexus journal health refresh        # Auto-fix drift (backfill missing commits)
 ```
 
 ## Documentation Update Rule
@@ -50,7 +53,10 @@ Trigger: Any change that adds/removes/renames an agent, tool, command, API endpo
 
 ## Key Directories
 - `src/` — Application source code
-- `bootstrap/` — Nexus CLI toolkit and model selection reference
-- `bootstrap/cli/tools/` — Individual CLI tool implementations
+- `Nexus/` — Nexus CLI toolkit (clone of github.com/llores28/Nexus, installed editable; `git pull` in this dir live-updates the `nexus` CLI)
+- `Nexus/nexus/cli/tools/` — Individual CLI tool implementations
+- `bootstrap/` — DEPRECATED forked copy; do not edit
+- `.nexus/` — Runtime state (gitignored): `state.json`, `state-summary.md`, `journal/YYYY-MM/DD.md`
+- `docs/ADR-YYYY-MM-DD-<slug>.md` — Atlas project ADRs (note: this is the project-local convention; Nexus's own `nexus journal decision add` would create files at `docs/decisions/` — ADRs live at the top of `docs/` here instead)
 - `.windsurf/` — Windsurf-specific rules, skills, workflows
 - `.github/` — GitHub Copilot instructions

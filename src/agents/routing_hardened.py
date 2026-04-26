@@ -382,9 +382,13 @@ class HardenedClassifier:
         """Calculate complexity score based on multiple factors."""
         score = 0.0
         
-        # Base complexity from intent
+        # Base complexity from intent.
+        # NOTE: "moderate_analysis" lives in the MEDIUM tier (see
+        # COMPLEXITY_INDICATORS above). Looking it up under "high" raises
+        # KeyError, which silently dropped every ANALYZE-intent message into
+        # the heuristic fallback and degraded production routing.
         if intent_scores.get(TaskIntent.ANALYZE, 0) > 0.5:
-            score += cls.COMPLEXITY_INDICATORS["high"]["moderate_analysis"]
+            score += cls.COMPLEXITY_INDICATORS["medium"]["moderate_analysis"]
         elif intent_scores.get(TaskIntent.EXECUTE, 0) > 0.5:
             score += cls.COMPLEXITY_INDICATORS["medium"]["write_operation"]
         elif intent_scores.get(TaskIntent.SEARCH, 0) > 0.5:

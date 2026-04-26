@@ -8,6 +8,7 @@ Verifies that Gmail, Calendar, Tasks, Drive, and Scheduler agents:
 """
 
 import json
+from types import SimpleNamespace
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -504,6 +505,123 @@ class TestWorkspaceToolErrorHandling:
         assert "[TOOL ERROR]" in result
         assert "bad argument" in result
         assert "WebSearch" in result
+
+
+class TestWorkspaceRateLimitHandling:
+    """Rate-limit / quota responses retry with backoff and surface as a clean
+    [RATE LIMIT] message after exhausting tenacity's retry budget."""
+
+    @pytest.fixture
+    def fast_retry(self):
+        """Skip the exponential backoff sleeps so retry tests run instantly."""
+        from tenacity import wait_none
+        from src.integrations import workspace_mcp
+        original = workspace_mcp._call_workspace_tool_inner.retry.wait
+        workspace_mcp._call_workspace_tool_inner.retry.wait = wait_none()
+        yield
+        workspace_mcp._call_workspace_tool_inner.retry.wait = original
+
+    @pytest.mark.asyncio
+    async def test_429_in_exception_message_triggers_retry(self, fast_retry):
+        from src.integrations import workspace_mcp
+
+        mock_server = MagicMock()
+        mock_server.connect = AsyncMock()
+        # Persistent rate-limit error (every retry sees it).
+        mock_server.call_tool = AsyncMock(
+            side_effect=RuntimeError("HTTP 429: User Rate Limit Exceeded")
+        )
+        mock_server.cleanup = AsyncMock()
+
+        with patch.object(workspace_mcp, "create_workspace_mcp_server", return_value=mock_server):
+            result = await workspace_mcp.call_workspace_tool("send_email", {"to": "x@y.z"})
+
+        # Tenacity retried 3 times before giving up.
+        assert mock_server.call_tool.await_count == 3
+        # User-facing surface is [RATE LIMIT], not [TOOL ERROR].
+        assert "[RATE LIMIT]" in result
+        assert "wait" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_quota_exceeded_in_exception_triggers_retry(self, fast_retry):
+        from src.integrations import workspace_mcp
+
+        mock_server = MagicMock()
+        mock_server.connect = AsyncMock()
+        mock_server.call_tool = AsyncMock(
+            side_effect=RuntimeError("Quota exceeded for daily limit")
+        )
+        mock_server.cleanup = AsyncMock()
+
+        with patch.object(workspace_mcp, "create_workspace_mcp_server", return_value=mock_server):
+            result = await workspace_mcp.call_workspace_tool("list_drive_items", {})
+
+        assert mock_server.call_tool.await_count == 3
+        assert "[RATE LIMIT]" in result
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_in_tool_result_text_triggers_retry(self, fast_retry):
+        """Some MCP servers return rate-limit signals as tool result text rather
+        than as raised exceptions. Detection must work in both paths."""
+        from src.integrations import workspace_mcp
+
+        # Build a fake MCP result whose .content[].text contains the rate-limit phrase.
+        rate_limit_content = SimpleNamespace(
+            text="Error 429: too many requests. retryAfter: 30s"
+        )
+        rate_limit_result = SimpleNamespace(content=[rate_limit_content])
+
+        mock_server = MagicMock()
+        mock_server.connect = AsyncMock()
+        mock_server.call_tool = AsyncMock(return_value=rate_limit_result)
+        mock_server.cleanup = AsyncMock()
+
+        with patch.object(workspace_mcp, "create_workspace_mcp_server", return_value=mock_server):
+            result = await workspace_mcp.call_workspace_tool("get_calendar_events", {})
+
+        assert mock_server.call_tool.await_count == 3
+        assert "[RATE LIMIT]" in result
+
+    @pytest.mark.asyncio
+    async def test_non_rate_limit_error_does_not_retry(self, fast_retry):
+        """Sanity check: errors that AREN'T rate limits must still go through
+        the existing single-attempt path (this is the contract guarded by the
+        existing test_generic_tool_error_returns_message test)."""
+        from src.integrations import workspace_mcp
+
+        mock_server = MagicMock()
+        mock_server.connect = AsyncMock()
+        mock_server.call_tool = AsyncMock(side_effect=ValueError("bad argument"))
+        mock_server.cleanup = AsyncMock()
+
+        with patch.object(workspace_mcp, "create_workspace_mcp_server", return_value=mock_server):
+            result = await workspace_mcp.call_workspace_tool("create_drive_folder", {})
+
+        # Only one attempt — non-transient errors aren't retried.
+        assert mock_server.call_tool.await_count == 1
+        assert "[TOOL ERROR]" in result
+
+    def test_rate_limit_detection_patterns(self):
+        from src.integrations.workspace_mcp import _is_rate_limit
+        # Positive cases.
+        assert _is_rate_limit("HTTP 429 received")
+        assert _is_rate_limit("rate limit exceeded")
+        assert _is_rate_limit("RateLimitExceeded")
+        assert _is_rate_limit("user rate limit exceeded for project")
+        assert _is_rate_limit("Quota exceeded")
+        assert _is_rate_limit("too many requests")
+        # Negative cases.
+        assert not _is_rate_limit("permission denied")
+        assert not _is_rate_limit("bad argument")
+        assert not _is_rate_limit("file not found")
+
+    def test_retry_after_extraction(self):
+        from src.integrations.workspace_mcp import _parse_retry_after
+        assert _parse_retry_after('{"retryAfter": "42"}') == 42.0
+        assert _parse_retry_after('{"retry_after_seconds": 7}') == 7.0
+        assert _parse_retry_after("Retry-After: 30") == 30.0
+        assert _parse_retry_after("retry after 5") == 5.0
+        assert _parse_retry_after("nothing here") is None
 
 
 # ── Stale Memory Filter ──────────────────────────────────────────────────────

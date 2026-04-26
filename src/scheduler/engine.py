@@ -6,7 +6,7 @@ Jobs persist across container restarts (PRD §12).
 import logging
 from typing import Optional, Callable
 
-from apscheduler import AsyncScheduler
+from apscheduler import AsyncScheduler, ConflictPolicy
 from apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -43,6 +43,15 @@ async def start_scheduler() -> None:
     scheduler = await get_scheduler()
     await scheduler.__aenter__()
 
+    # Wire observability BEFORE registering jobs so the very first run is
+    # captured in the health record (otherwise the listener misses startup-
+    # adjacent fires).
+    try:
+        from src.scheduler.observability import register_scheduler_health_listener
+        register_scheduler_health_listener(scheduler)
+    except Exception as e:
+        logger.warning("Could not register scheduler health listener: %s", e)
+
     # Add a periodic sync job to pick up tasks from DB (created by orchestration API)
     try:
         await add_interval_job(
@@ -54,6 +63,40 @@ async def start_scheduler() -> None:
         logger.info("Added periodic DB sync job (every 30s)")
     except Exception as e:
         logger.warning("Could not add sync job: %s", e)
+
+    # Nightly system maintenance: memory eviction (Mem0 cap enforcement).
+    # `replace_existing` ensures schedule/args updates from code take effect
+    # on every startup. UTC explicitly to dodge DST.
+    try:
+        await add_cron_job(
+            func_path="src.scheduler.maintenance:nightly_memory_eviction",
+            job_id="_internal_nightly_memory_eviction",
+            cron_kwargs={"hour": 3, "minute": 0},
+            kwargs={},
+            timezone="UTC",
+            replace_existing=True,
+        )
+        logger.info("Added nightly memory eviction job (03:00 UTC)")
+    except Exception as e:
+        logger.warning("Could not add nightly eviction job: %s", e)
+
+    # Weekly OAuth heartbeat: prevents Google's 6-month idle revocation of
+    # refresh tokens by exercising each connected user's workspace-mcp path
+    # with a low-cost call. Per Google docs, a successful refresh-token
+    # exchange resets the idle clock; the follow-on userinfo call confirms
+    # the access token works (catches scope-revoke / password-change).
+    try:
+        await add_cron_job(
+            func_path="src.scheduler.maintenance:weekly_oauth_heartbeat",
+            job_id="_internal_weekly_oauth_heartbeat",
+            cron_kwargs={"day_of_week": "mon", "hour": 9, "minute": 0},
+            kwargs={},
+            timezone="UTC",
+            replace_existing=True,
+        )
+        logger.info("Added weekly OAuth heartbeat job (Mon 09:00 UTC)")
+    except Exception as e:
+        logger.warning("Could not add OAuth heartbeat job: %s", e)
 
     # Ensure the scheduler actually runs jobs
     try:
@@ -93,6 +136,9 @@ async def add_cron_job(
     cron_kwargs: dict,
     args: Optional[list] = None,
     kwargs: Optional[dict] = None,
+    *,
+    timezone: Optional[str] = None,
+    replace_existing: bool = False,
 ) -> str:
     """Add a cron-triggered job.
 
@@ -102,21 +148,33 @@ async def add_cron_job(
         cron_kwargs: CronTrigger kwargs (day_of_week, hour, minute, etc.)
         args: Positional args for the callable
         kwargs: Keyword args for the callable
+        timezone: Override the scheduler's default timezone. Pass "UTC" for
+            system-level maintenance jobs to avoid DST gotchas (per APScheduler
+            maintainer guidance — DST transitions can skip or double-fire jobs
+            on tz-aware schedules).
+        replace_existing: If True, re-register the job even when one with this
+            ID already exists in the data store. Useful for system jobs that
+            are re-installed on every startup so code changes (new schedule,
+            new args) take effect.
 
     Returns:
         The job ID.
     """
     func = _resolve_callable(func_path)  # Validate early — raises ValueError if path is broken
     scheduler = await get_scheduler()
-    trigger = CronTrigger(**cron_kwargs, timezone=settings.default_timezone)
-    await scheduler.add_schedule(
-        func_or_task_id=func,
-        trigger=trigger,
-        id=job_id,
-        args=args or [],
-        kwargs=kwargs or {},
-    )
-    logger.info("Cron job added: %s (%s)", job_id, cron_kwargs)
+    tz = timezone or settings.default_timezone
+    trigger = CronTrigger(**cron_kwargs, timezone=tz)
+    add_kwargs: dict = {
+        "func_or_task_id": func,
+        "trigger": trigger,
+        "id": job_id,
+        "args": args or [],
+        "kwargs": kwargs or {},
+    }
+    if replace_existing:
+        add_kwargs["conflict_policy"] = ConflictPolicy.replace
+    await scheduler.add_schedule(**add_kwargs)
+    logger.info("Cron job added: %s (%s, tz=%s)", job_id, cron_kwargs, tz)
     return job_id
 
 
