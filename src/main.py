@@ -130,10 +130,35 @@ async def _health_probe_loop() -> None:
         await asyncio.sleep(30)
 
 
+def _check_workspace_mcp_persistence() -> None:
+    """Warn at startup if workspace-mcp token persistence is misconfigured.
+
+    Without WORKSPACE_MCP_SIGNING_KEY set, the sidecar derives its Fernet
+    key from GOOGLE_OAUTH_CLIENT_SECRET — fine until the secret is rotated,
+    after which every persisted token becomes unreadable. The weekly OAuth
+    heartbeat would then nudge every connected user, looking like a mass
+    Google revocation event. We only warn (not raise) so dev environments
+    without Google connected still boot cleanly. See
+    ADR-2026-04-26-workspace-mcp-token-persistence.md.
+    """
+    if settings.google_oauth_client_id and not settings.workspace_mcp_signing_key:
+        logger.warning(
+            "WORKSPACE_MCP_SIGNING_KEY is empty but Google OAuth is configured. "
+            "Token persistence will fall back to deriving the encryption key "
+            "from GOOGLE_OAUTH_CLIENT_SECRET — a client-secret rotation will "
+            "silently invalidate every persisted token. Run "
+            "`python scripts/ensure_workspace_mcp_key.py` to generate one and "
+            "re-deploy."
+        )
+
+
 async def main() -> None:
     """Main entry point."""
     try:
         logger.info("Starting PersonalAssistant...")
+
+        # Surface workspace-mcp persistence misconfig before any heartbeat fires.
+        _check_workspace_mcp_persistence()
 
         # Run DB migrations
         await run_migrations()

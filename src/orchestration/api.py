@@ -5460,11 +5460,22 @@ def _extract_json_block(text: str) -> Optional[dict]:
 
 
 @app.get("/api/scheduler/health")
-async def scheduler_health():
-    """Check if the scheduler (cron/heartbeat) is working properly.
+async def scheduler_runtime_health():
+    """Dashboard-facing scheduler runtime check.
 
-    Note: This runs in the orchestration-api container, not the assistant container.
-    We query the database directly to check scheduler status.
+    Distinct from the public observability endpoint at `/api/health/scheduler`:
+        - `/api/health/scheduler` (public, no auth) reports per-job *outcome*
+          history from the Redis observability records (consecutive_failures,
+          last_status, etc.) populated by the JobReleased listener. Best for
+          monitoring tools.
+        - This endpoint (`/api/scheduler/health`, dashboard-only) reports
+          *runtime liveness*: whether APScheduler is alive, how many jobs are
+          currently registered, and the upcoming-run preview from the
+          `scheduled_tasks` table. Best for "is my scheduler container up?".
+
+    To save the dashboard a round-trip, this endpoint also includes the
+    observability snapshot under `per_job_health` so the UI gets both views
+    in one call.
     """
     try:
         # Query scheduled_tasks table directly from DB
@@ -5491,6 +5502,16 @@ async def scheduler_health():
         # or if there are active tasks in our DB (scheduler may be starting up)
         is_healthy = len(live_jobs) > 0 or active_count > 0
 
+        # Co-locate the per-job observability snapshot so the dashboard's
+        # one poll covers both runtime liveness AND per-job health.
+        per_job_health: dict
+        try:
+            from src.scheduler.observability import get_health_snapshot
+            per_job_health = await get_health_snapshot()
+        except Exception as snap_err:
+            logger.warning("Could not attach per_job_health snapshot: %s", snap_err)
+            per_job_health = {"status": "unknown", "jobs": [], "summary": {"error": str(snap_err)}}
+
         return {
             "status": "healthy" if is_healthy else "starting",
             "scheduler_running": len(live_jobs) > 0,
@@ -5505,6 +5526,7 @@ async def scheduler_health():
                 }
                 for t in tasks
             ],
+            "per_job_health": per_job_health,
             "message": "Scheduler operational" if is_healthy else "Scheduler starting or no active jobs",
         }
     except Exception as e:

@@ -97,6 +97,13 @@ class Settings(BaseSettings):
     google_oauth_client_id: str = Field(default="")
     google_oauth_client_secret: str = Field(default="")
     workspace_mcp_url: str = Field(default="http://workspace-mcp:8000/mcp")
+    # Token-encryption key for the workspace-mcp sidecar's persistent store
+    # (FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY in the container's env).
+    # Empty default is permitted so .env-less dev environments still load,
+    # but main.py emits a startup warning when this is empty AND
+    # google_oauth_client_id is set — the heartbeat would then false-positive
+    # on every container rebuild. See ADR-2026-04-26-workspace-mcp-token-persistence.
+    workspace_mcp_signing_key: str = Field(default="")
 
     # ── Web Search (optional) ──
     tavily_api_key: str = Field(default="")

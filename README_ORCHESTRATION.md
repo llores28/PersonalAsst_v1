@@ -119,6 +119,17 @@ Services started:
 - OpenAPI docs at http://localhost:8000/docs
 - WebSocket endpoint at ws://localhost:8000/ws
 
+##### Scheduler health endpoints
+
+Two complementary endpoints; pick the one that matches the question you're asking:
+
+| Endpoint | Auth | Source | Answers |
+|---|---|---|---|
+| `GET /api/health/scheduler` | Public | Redis observability records (`scheduler_health:{schedule_id}`) | "Are my scheduled jobs healthy?" — per-job last_status, consecutive_failures, total_runs/failures. Returns `status: healthy / degraded / unknown`. Best for monitoring tools. See [ADR-2026-04-26-scheduler-observability.md](docs/ADR-2026-04-26-scheduler-observability.md). |
+| `GET /api/scheduler/health` | API key required | Postgres `scheduled_tasks` + APScheduler runtime | "Is the scheduler container alive and registering jobs?" — runtime liveness, active task count, upcoming runs. Also embeds the observability snapshot under `per_job_health` so the dashboard gets both views in one call. |
+
+The dashboard polls `/api/scheduler/health` because it wants both runtime liveness AND per-job health. External monitoring tools should hit `/api/health/scheduler` (public, observability-only).
+
 ### 3. Create Your First Agent Team
 
 ```python

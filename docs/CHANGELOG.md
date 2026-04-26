@@ -1,5 +1,28 @@
 # Changelog
 
+## 2026-04-26 — Cohesion audit fixes (settings symmetry + endpoint disambiguation)
+
+A deep audit surfaced three gaps and three observability holes in the post-cleanup state. Net: zero blockers, but several places where the system *looked* configured but wasn't fully wired. Closed all six in this commit.
+
+### Fixed — Endpoint disambiguation (was: "duplicate scheduler health route")
+The repo had two scheduler-health endpoints in [src/orchestration/api.py](../src/orchestration/api.py) that the audit flagged as duplicates. They actually answer *different* questions; the fix was clarification + integration, not deletion:
+
+- `GET /api/health/scheduler` (public, line 636) — Redis-backed *per-job observability* (last_status, consecutive_failures, total_runs/failures from the `JobReleased` listener). Best for monitoring tools.
+- `GET /api/scheduler/health` (auth-gated, line 5462) — Postgres + APScheduler-runtime *liveness check* (is the container alive, how many jobs are registered, what's coming up). Best for the dashboard.
+
+The dashboard's existing call to `/api/scheduler/health` now also embeds the observability snapshot under a new `per_job_health` field, so the UI gets both views in one round-trip. The `scheduler_health` function name on line 5462 was also renamed to `scheduler_runtime_health` to avoid the Python-level shadowing the audit caught.
+
+### Fixed — Settings/env symmetry for `WORKSPACE_MCP_SIGNING_KEY`
+- Added `workspace_mcp_signing_key: str = Field(default="")` to [src/settings.py](../src/settings.py). Previously the var was in `.env.example` and `docker-compose.yml` but had no Pydantic field, so the application couldn't read or validate it.
+- Added a startup hook `_check_workspace_mcp_persistence()` in [src/main.py](../src/main.py) that emits a WARNING if `google_oauth_client_id` is set but `workspace_mcp_signing_key` is empty. Without this, the heartbeat false-positives we shipped to prevent earlier today would still fire if someone forgot to run `scripts/ensure_workspace_mcp_key.py`. Doesn't raise — dev environments without Google connected still boot cleanly.
+
+### Updated — README_ORCHESTRATION
+[README_ORCHESTRATION.md](../README_ORCHESTRATION.md) now documents both scheduler-health endpoints with a comparison table. External tooling and dashboard wiring is now unambiguous.
+
+### Verification
+- `pytest -q`: 1096 passed / 0 failed / 6 skipped / 7 xfailed (unchanged from before this commit).
+- The audit produced zero BLOCKERs. The remaining open item from the audit (GAP-3: dashboard UI doesn't render `degraded` status visually) is genuine UI work and tracked separately.
+
 ## 2026-04-26 — Removed deprecated `bootstrap/` from the repo
 
 The forked CLI copy at `bootstrap/cli/` had been marked DEPRECATED for some time but was still tracked in git, still partially edited, and still referenced from 19 `.windsurf/` skills and workflows. The migration to the editable `Nexus/` install (the `nexus` command) was effectively done; the residual `bootstrap/` tree was just confusing.
