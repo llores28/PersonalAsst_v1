@@ -14,22 +14,22 @@ description: Run a supply chain security audit to detect compromised npm package
 
 ### Full package scan
 ```
-python bootstrap/cli/bs_cli.py supply-chain scan . --format human
+nexus supply-chain scan . --format human
 ```
 
 ### IOC check (known malicious domains/IPs)
 ```
-python bootstrap/cli/bs_cli.py supply-chain ioc --format human
+nexus supply-chain ioc --format human
 ```
 
 ### Detailed audit report
 ```
-python bootstrap/cli/bs_cli.py supply-chain audit . --format human
+nexus supply-chain audit . --format human
 ```
 
 ### Check advisories for a specific package
 ```
-python bootstrap/cli/bs_cli.py supply-chain advisories <package> --format human
+nexus supply-chain advisories <package> --format human
 ```
 
 ## What It Checks

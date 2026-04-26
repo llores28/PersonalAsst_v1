@@ -55,7 +55,7 @@ Trigger: Any change that adds/removes/renames an agent, tool, command, API endpo
 - `src/` — Application source code
 - `Nexus/` — Nexus CLI toolkit (clone of github.com/llores28/Nexus, installed editable; `git pull` in this dir live-updates the `nexus` CLI)
 - `Nexus/nexus/cli/tools/` — Individual CLI tool implementations
-- `bootstrap/` — DEPRECATED forked copy; do not edit
+- `bootstrap/` — REMOVED 2026-04-26 (gitignored). The forked CLI copy has been excised; all tooling now goes through the editable `Nexus/` install.
 - `.nexus/` — Runtime state (gitignored): `state.json`, `state-summary.md`, `journal/YYYY-MM/DD.md`
 - `docs/ADR-YYYY-MM-DD-<slug>.md` — Atlas project ADRs (note: this is the project-local convention; Nexus's own `nexus journal decision add` would create files at `docs/decisions/` — ADRs live at the top of `docs/` here instead)
 - `.windsurf/` — Windsurf-specific rules, skills, workflows

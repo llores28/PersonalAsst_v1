@@ -19,12 +19,12 @@ description: Systematic debugging using CLI tools — reproduce, inspect, narrow
 
 ## Commands
 ```
-python bootstrap/cli/bs_cli.py debug logs <path>
-python bootstrap/cli/bs_cli.py debug trace "<error message>"
-python bootstrap/cli/bs_cli.py debug deps
-python bootstrap/cli/bs_cli.py debug env
-python bootstrap/cli/bs_cli.py debug ports
-python bootstrap/cli/bs_cli.py debug secrets-scan
+nexus debug logs <path>
+nexus debug trace "<error message>"
+nexus debug deps
+nexus debug env
+nexus debug ports
+nexus debug secrets-scan
 ```
 
 ## Pre-commit check

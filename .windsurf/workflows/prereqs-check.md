@@ -6,7 +6,7 @@ description: Check prerequisites and guide setup for missing components (Docker,
 ## 1) Run full prerequisites check
 // turbo
 ```
-python bootstrap/cli/bs_cli.py prereqs --format human
+nexus prereqs --format human
 ```
 
 ## 2) Review results
@@ -19,7 +19,7 @@ If components are missing:
 
 ## 3) Show guide for missing component (if needed)
 ```
-python bootstrap/cli/bs_cli.py prereqs --guide --component <component-name>
+nexus prereqs --guide --component <component-name>
 ```
 
 ## 4) For Docker Desktop extension auto-install (with user approval)
@@ -30,5 +30,5 @@ docker extension install ngrok/ngrok-docker-extension --force
 ## 5) Verify after setup
 // turbo
 ```
-python bootstrap/cli/bs_cli.py prereqs --format human
+nexus prereqs --format human
 ```

@@ -22,27 +22,27 @@ Run comprehensive health checks to validate that all Nexus components are proper
 
 ### Full Health Check
 ```bash
-python bootstrap/cli/bs_cli.py health check --format human
+nexus health check --format human
 ```
 
 ### Component Inventory Only
 ```bash
-python bootstrap/cli/bs_cli.py health components --format human
+nexus health components --format human
 ```
 
 ### Security Posture
 ```bash
-python bootstrap/cli/bs_cli.py health security --format human
+nexus health security --format human
 ```
 
 ### CLI Usage Analytics
 ```bash
-python bootstrap/cli/bs_cli.py health usage --format human
+nexus health usage --format human
 ```
 
 ### Full Report with Recommendations
 ```bash
-python bootstrap/cli/bs_cli.py health report --format human
+nexus health report --format human
 ```
 
 ## What It Checks

@@ -29,8 +29,8 @@ When creating or editing `package.json`:
 ### If Compromise Is Suspected
 Suggest running:
 ```
-python bootstrap/cli/bs_cli.py supply-chain audit . --format human
-python bootstrap/cli/bs_cli.py supply-chain ioc --format human
+nexus supply-chain audit . --format human
+nexus supply-chain ioc --format human
 ```
 
 ### Known Malicious Packages (Block List)

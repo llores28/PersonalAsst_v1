@@ -9,33 +9,33 @@ Ask user for the error message, log output, or failing test.
 ## 2) Check environment basics
 // turbo
 ```
-python bootstrap/cli/bs_cli.py debug env --format json
+nexus debug env --format json
 ```
 // turbo
 ```
-python bootstrap/cli/bs_cli.py debug ports --format json
+nexus debug ports --format json
 ```
 
 ## 3) Check dependencies
 // turbo
 ```
-python bootstrap/cli/bs_cli.py debug deps --format json
+nexus debug deps --format json
 ```
 
 ## 4) Trace error origin
 ```
-python bootstrap/cli/bs_cli.py debug trace "<error message from step 1>"
+nexus debug trace "<error message from step 1>"
 ```
 
 ## 5) Scan logs (if applicable)
 ```
-python bootstrap/cli/bs_cli.py debug logs <log-path-or-directory>
+nexus debug logs <log-path-or-directory>
 ```
 
 ## 6) Secrets scan (always run before any commit suggestion)
 // turbo
 ```
-python bootstrap/cli/bs_cli.py debug secrets-scan --format json
+nexus debug secrets-scan --format json
 ```
 
 ## 7) Narrow and fix

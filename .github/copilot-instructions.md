@@ -40,7 +40,6 @@ Primary UX: Telegram. LLM: OpenAI (Responses API). Infra: Docker Compose (Postgr
 src/                  — Application source code
 Nexus/                — Nexus CLI clone, pip-installed editable (`nexus` command)
 Nexus/nexus/cli/      — Python CLI tools entry point (`bs_cli.py`)
-bootstrap/            — DEPRECATED forked copy; do not edit
 .nexus/               — Runtime state: state.json, state-summary.md, journal/, decisions/
 .windsurf/rules/      — Windsurf rule files
 .windsurf/skills/     — Skill definitions

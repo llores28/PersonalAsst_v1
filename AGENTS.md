@@ -26,8 +26,8 @@ src/db/                 # SQLAlchemy models, Alembic migrations
 src/orchestration/      # Organization/project management API + Dashboard API
 src/models/             # Model catalog, cost_tracker.py (shared record_llm_cost helper)
 src/config/             # Runtime YAML configs (persona, safety, tiers)
-bootstrap/              # Nexus CLI toolkit (smoketest, debug, health, etc.)
-bootstrap/cli/          # Python CLI tools entry point: bs_cli.py
+Nexus/                  # Nexus CLI toolkit (editable pip install; `nexus` command)
+Nexus/nexus/cli/        # Python CLI tools (entry point: nexus.cli.bs_cli)
 .windsurf/rules/        # Always-on AI rules for this project
 .windsurf/skills/       # Reusable skill definitions (SKILL.md files)
 .windsurf/workflows/    # Slash-command workflow definitions
@@ -80,22 +80,22 @@ Skip for minor typos or internal refactors with no behavior change. Make targete
 - Keep responses concise — no restating known context.
 - For simple edits, suggest Ctrl+I (Command mode, free, no quota cost).
 - Suggest user run tests manually rather than auto-executing.
-- **Model selection**: Use `bootstrap/model-selection-reference.md` for strategy.
+- **Model selection**: Use `Nexus/nexus/model-selection-reference.md` for strategy.
 
 ## Testing
 
-- Run `python bootstrap/cli/bs_cli.py smoketest --level quick` for quick verification.
-- Run `python bootstrap/cli/bs_cli.py prereqs` to check prerequisites.
+- Run `nexus smoketest --level quick` for quick verification.
+- Run `nexus prereqs` to check prerequisites.
 - CLI tools emit structured JSON by default (`--format json`), human output via `--format human`.
 
 ## CLI Toolkit Commands
 
 ```
-python bootstrap/cli/bs_cli.py prereqs           # Check prerequisites
-python bootstrap/cli/bs_cli.py smoketest         # Run smoke tests
-python bootstrap/cli/bs_cli.py debug logs <path> # Inspect logs
-python bootstrap/cli/bs_cli.py health check      # Nexus health check
-python bootstrap/cli/bs_cli.py supply-chain scan  # Supply chain audit
+nexus prereqs           # Check prerequisites
+nexus smoketest         # Run smoke tests
+nexus debug logs <path> # Inspect logs
+nexus health check      # Nexus health check
+nexus supply-chain scan  # Supply chain audit
 ```
 
 ## Organization Project Setup Workflow
@@ -182,7 +182,7 @@ Inline keyboard buttons `repair_approve:<id>` and `repair_skip:<id>` are also re
 
 ## Model Selection
 
-Uses the complexity ladder from `bootstrap/model-selection-reference.md`:
+Uses the complexity ladder from `Nexus/nexus/model-selection-reference.md`:
 
 - **Simple tasks** (typos, formatting): SWE-1.5 (Free)
 - **Moderate tasks** (multi-file edits): GPT-5 Low

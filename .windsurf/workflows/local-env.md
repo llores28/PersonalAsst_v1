@@ -6,22 +6,22 @@ description: Local container validation and shareable preview via Docker Desktop
 ## 1) Prerequisites check
 // turbo
 ```
-python bootstrap/cli/bs_cli.py prereqs --component docker --format json
+nexus prereqs --component docker --format json
 ```
 
 ## 2) Initialize Docker files (if needed)
 ```
-python bootstrap/cli/bs_cli.py local-env init --format json
+nexus local-env init --format json
 ```
 
 ## 3) Build the image
 ```
-python bootstrap/cli/bs_cli.py local-env build --format json
+nexus local-env build --format json
 ```
 
 ## 4) Start containers
 ```
-python bootstrap/cli/bs_cli.py local-env up --format json
+nexus local-env up --format json
 ```
 
 ## 5) Visual verification
@@ -30,7 +30,7 @@ If health check passes, use Cascade's `browser_preview` tool on the reported loc
 ## 6) Pre-production readiness check
 // turbo
 ```
-python bootstrap/cli/bs_cli.py local-env validate --format json
+nexus local-env validate --format json
 ```
 
 ## 7) Share with others (if requested)
@@ -44,5 +44,5 @@ Cascade cannot drive Docker Desktop GUI extensions directly.
 
 ## 8) Teardown
 ```
-python bootstrap/cli/bs_cli.py local-env down --format json
+nexus local-env down --format json
 ```

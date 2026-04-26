@@ -52,13 +52,13 @@ Review existing `.windsurf/rules/` and suggest changing non-critical rules from 
 ## 7) Run prerequisites check
 // turbo
 ```
-python bootstrap/cli/bs_cli.py prereqs --format human
+nexus prereqs --format human
 ```
 
 ## 8) Run quick smoketest
 // turbo
 ```
-python bootstrap/cli/bs_cli.py smoketest --level quick --format human
+nexus smoketest --level quick --format human
 ```
 
 ## 9) Report

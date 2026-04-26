@@ -12,10 +12,10 @@ description: Research dependencies, docs, and APIs for informed architecture dec
 
 ## Commands
 ```
-python bootstrap/cli/bs_cli.py research docs "<query>"
-python bootstrap/cli/bs_cli.py research deps <package>
-python bootstrap/cli/bs_cli.py research changelog <package>
-python bootstrap/cli/bs_cli.py research compare <pkg-a> <pkg-b>
+nexus research docs "<query>"
+nexus research deps <package>
+nexus research changelog <package>
+nexus research compare <pkg-a> <pkg-b>
 ```
 
 ## When to use CLI vs native tools

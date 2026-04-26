@@ -8,7 +8,7 @@ Validates that all Nexus components (rules, skills, workflows, cross-IDE files) 
 ## 1) Run full health check
 // turbo
 ```
-python bootstrap/cli/bs_cli.py health check --format human
+nexus health check --format human
 ```
 
 ## 2) Review results
@@ -17,7 +17,7 @@ Examine the health score and any issues found. A score > 80 indicates healthy co
 ## 3) If issues found, run detailed report
 // turbo
 ```
-python bootstrap/cli/bs_cli.py health report --format human
+nexus health report --format human
 ```
 
 ## 4) Fix critical issues first
@@ -30,17 +30,17 @@ Follow the recommendations in priority order:
 ## 5) Re-run health check to verify fixes
 // turbo
 ```
-python bootstrap/cli/bs_cli.py health check --format human
+nexus health check --format human
 ```
 
 ## 6) Optional: Check security posture separately
 // turbo
 ```
-python bootstrap/cli/bs_cli.py health security --format human
+nexus health security --format human
 ```
 
 ## 7) Optional: Review CLI usage analytics
 // turbo
 ```
-python bootstrap/cli/bs_cli.py health usage --format human
+nexus health usage --format human
 ```

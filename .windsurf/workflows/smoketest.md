@@ -6,7 +6,7 @@ description: Run tiered smoke tests to verify project health
 ## 1) Quick smoketest (deps, lint, tests)
 // turbo
 ```
-python bootstrap/cli/bs_cli.py smoketest --level quick --format json
+nexus smoketest --level quick --format json
 ```
 
 ## 2) Review results
@@ -16,7 +16,7 @@ python bootstrap/cli/bs_cli.py smoketest --level quick --format json
 
 ## 3) Full smoketest (includes build + server health check)
 ```
-python bootstrap/cli/bs_cli.py smoketest --level full --format json
+nexus smoketest --level full --format json
 ```
 
 ## 4) Visual verification (web apps only)

@@ -5,22 +5,22 @@ description: Fetch and summarize external documentation or API content
 
 ## 1) Single page fetch
 ```
-python bootstrap/cli/bs_cli.py scrape page <url> --format json
+nexus scrape page <url> --format json
 ```
 
 ## 2) JSON API fetch
 ```
-python bootstrap/cli/bs_cli.py scrape api <url> --format json
+nexus scrape api <url> --format json
 ```
 
 ## 3) Extract links from a page
 ```
-python bootstrap/cli/bs_cli.py scrape links <url> --format json
+nexus scrape links <url> --format json
 ```
 
 ## 4) Crawl a documentation site
 ```
-python bootstrap/cli/bs_cli.py scrape docs <url> --depth 2 --format json
+nexus scrape docs <url> --depth 2 --format json
 ```
 
 ## When to use native tools instead

@@ -1,5 +1,29 @@
 # Changelog
 
+## 2026-04-26 — Removed deprecated `bootstrap/` from the repo
+
+The forked CLI copy at `bootstrap/cli/` had been marked DEPRECATED for some time but was still tracked in git, still partially edited, and still referenced from 19 `.windsurf/` skills and workflows. The migration to the editable `Nexus/` install (the `nexus` command) was effectively done; the residual `bootstrap/` tree was just confusing.
+
+### Removed (from git tracking; local files preserved)
+- `git rm -r --cached bootstrap/` — 70+ files untracked. Local copy left in place; the [updated .gitignore](../.gitignore) prevents re-tracking.
+- `git rm --cached .cache/bs-cli/audit.jsonl` — stale tracking from before `.cache/` was gitignored.
+
+### Dependency audit (no Atlas runtime breakage)
+Auditor confirmed no `from bootstrap...` imports in `src/`, `tests/`, `scripts/`, no subprocess calls to `python bootstrap/cli/...`, no Docker mounts, no CI workflows referencing it. The single import at `Nexus/nexus/cli/security.py:26` (`from bootstrap.cli.utils import find_project_root`) is dead code — every actual `validate_path()` call site passes `project_root` explicitly. Filed as a separate Nexus-side cleanup; the import only fires if someone calls `validate_path("foo")` without a second argument, and nobody does.
+
+### Updated stale references
+- 19 `.windsurf/` files: 71 occurrences of `python bootstrap/cli/bs_cli.py <cmd>` → `nexus <cmd>`. One path-only reference (`bootstrap/cli/bs_cli.py` without the `python` prefix) repointed to `Nexus/nexus/cli/bs_cli.py`.
+- [AGENTS.md](../AGENTS.md): directory map and command examples switched to `Nexus/` and `nexus`.
+- [CLAUDE.md](../CLAUDE.md) and [.github/copilot-instructions.md](../.github/copilot-instructions.md): dropped the "DEPRECATED forked copy" callout (the directory no longer exists in git).
+
+### Verification
+- Atlas test suite still green (no imports broken).
+- `nexus --help` works (the dead bootstrap import is in a code path that's never exercised by current callers).
+
+### Migration note for contributors
+- After pulling this commit, your local `bootstrap/` directory will still exist on disk (gitignored). Delete it manually with `rm -rf bootstrap` if you want to clean up — the project no longer uses it.
+- If you need the tools that used to live there, run them via `nexus <subcommand>` instead.
+
 ## 2026-04-26 — ADR backfill (6 new architecture decision records)
 
 Captured the *why* behind today's substantial design decisions before the context faded. Each ADR follows the project format (Context / Decision / Consequences / Alternatives Considered) and links to the relevant source files.

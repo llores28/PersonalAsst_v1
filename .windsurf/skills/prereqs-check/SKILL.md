@@ -14,12 +14,12 @@ None — this IS the precheck.
 
 ## Command
 ```
-python bootstrap/cli/bs_cli.py prereqs --format json
+nexus prereqs --format json
 ```
 
 ## Guide for a specific missing component
 ```
-python bootstrap/cli/bs_cli.py prereqs --guide --component <name>
+nexus prereqs --guide --component <name>
 ```
 
 Available components: `python`, `git`, `node`, `docker`, `docker-compose`, `docker-extensions`, `docker-extension`

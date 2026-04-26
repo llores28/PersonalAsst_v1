@@ -11,7 +11,7 @@ description: Scaffold a new project-specific CLI tool that inherits the security
 
 ## Command
 ```
-python bootstrap/cli/bs_cli.py scaffold <name> --description "What this tool does"
+nexus scaffold <name> --description "What this tool does"
 ```
 
 ## What gets created
