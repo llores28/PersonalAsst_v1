@@ -170,13 +170,34 @@ def _filter_stale_memories(
         "cannot access gmail",
         "can't access calendar",
         "cannot access calendar",
-        # Reflector occasionally learned to suggest the user paste email
-        # content into chat as a workaround when the Gmail tool path failed
-        # transiently. After auth recovers, that guidance is exactly wrong —
-        # the assistant should call the connected tool, not ask for paste.
+        # Reflector "workaround" patterns: when the connected tool path
+        # transiently failed, the reflector occasionally learned that the
+        # right move is to ASK the user to paste content or re-do OAuth.
+        # After the underlying issue is fixed, those memories actively
+        # poison future runs — the agent reads them and refuses to call
+        # tools that now work.
         "ask for user to provide",
+        "ask the user to provide",
+        "ask user to provide",
         "ask the user to paste",
+        "ask user to paste",
         "paste the email",
+        "paste the message",
+        "request the user to complete oauth",
+        "request the user to authorize",
+        "should not claim access",
+        "must not claim access",
+        "claiming access",
+        "should clarify that it cannot",
+        "should clarify that the assistant cannot",
+        "offer a workaround",
+        "offer the workaround",
+        "without demonstrating access",
+        "without verifying the user",
+        "spoken-style summary",
+        "in this environment/session the assistant was unable",
+        "in this session the assistant was unable",
+        "unable to access the user",
         "drive access to be fixed",
         "before continuing other tasks",
         "require re-authorization",

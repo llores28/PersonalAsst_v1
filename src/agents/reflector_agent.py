@@ -142,6 +142,31 @@ def _is_poisoned_workspace_learning(text: str) -> bool:
         "not receiving the private", "require re-authorization",
         "may require re-", "needs to be fixed",
         "access may require", "access needs",
+        # "Use the connected tool" workarounds learned WHEN the tool
+        # actually failed during the conversation. After the underlying
+        # issue is fixed (auth recovered, MCP healthy), these become
+        # poisonous: they teach the agent to refuse to try, ask for paste,
+        # or send the user to OAuth even when neither is necessary.
+        "ask the user to provide", "ask user to provide",
+        "ask for user to provide",
+        "ask the user to paste", "ask user to paste",
+        "paste the email", "paste the message",
+        "request the user to complete oauth",
+        "request the user to authorize",
+        "should not claim access", "must not claim access",
+        "claiming access",
+        "should clarify that it cannot",
+        "should clarify that the assistant cannot",
+        "offer a workaround", "offer the workaround",
+        "without demonstrating access",
+        "without verifying the user",
+        "spoken-style summary",
+        "in this environment/session the assistant was unable",
+        "in this session the assistant was unable",
+        "unable to access the user",
+        "cannot access gmail", "can't access gmail",
+        "cannot access calendar", "can't access calendar",
+        "cannot access drive", "can't access drive",
     )
     return any(phrase in lowered for phrase in _POISON_PHRASES)
 
