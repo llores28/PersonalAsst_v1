@@ -66,9 +66,14 @@ async def add_memory(text: str, user_id: str, metadata: Optional[dict] = None) -
     mem = get_memory()
     meta = metadata or {}
 
-    # Dedup: check for near-duplicate before inserting
+    # Dedup: check for near-duplicate before inserting.
+    # Mem0 v2.x dropped the top-level user_id/limit kwargs from search() and
+    # get_all() in favor of `filters={"user_id": ...}` and `top_k`. The add()
+    # and delete_all() APIs still accept user_id directly. See the v1 -> v2
+    # migration warning: "Top-level entity parameters frozenset({'user_id'})
+    # are not supported in search(). Use filters={'user_id': '...'} instead."
     try:
-        existing = mem.search(text, user_id=user_id, limit=3)
+        existing = mem.search(text, filters={"user_id": user_id}, top_k=3)
         hits = existing.get("results", []) if isinstance(existing, dict) else existing
         for hit in hits:
             score = hit.get("score", 0)
@@ -90,9 +95,13 @@ async def add_memory(text: str, user_id: str, metadata: Optional[dict] = None) -
 
 
 async def search_memories(query: str, user_id: str, limit: int = 10) -> list[dict]:
-    """Search memories for a user by semantic similarity."""
+    """Search memories for a user by semantic similarity.
+
+    Mem0 v2.x: pass `filters={"user_id": ...}` and `top_k=` (was top-level
+    `user_id=` and `limit=` in v1).
+    """
     mem = get_memory()
-    results = mem.search(query, user_id=user_id, limit=limit)
+    results = mem.search(query, filters={"user_id": user_id}, top_k=limit)
     hits = results.get("results", []) if isinstance(results, dict) else results
 
     # Track access count on each returned memory
@@ -109,9 +118,12 @@ async def search_memories(query: str, user_id: str, limit: int = 10) -> list[dic
 
 
 async def get_all_memories(user_id: str) -> list[dict]:
-    """Get all memories for a user."""
+    """Get all memories for a user.
+
+    Mem0 v2.x: pass `filters={"user_id": ...}` (was top-level `user_id=` in v1).
+    """
     mem = get_memory()
-    results = mem.get_all(user_id=user_id)
+    results = mem.get_all(filters={"user_id": user_id})
     return results.get("results", []) if isinstance(results, dict) else results
 
 

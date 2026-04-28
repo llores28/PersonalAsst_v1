@@ -166,6 +166,17 @@ def _filter_stale_memories(
         "connector issue",
         "can't access drive",
         "cannot access drive",
+        "can't access gmail",
+        "cannot access gmail",
+        "can't access calendar",
+        "cannot access calendar",
+        # Reflector occasionally learned to suggest the user paste email
+        # content into chat as a workaround when the Gmail tool path failed
+        # transiently. After auth recovers, that guidance is exactly wrong —
+        # the assistant should call the connected tool, not ask for paste.
+        "ask for user to provide",
+        "ask the user to paste",
+        "paste the email",
         "drive access to be fixed",
         "before continuing other tasks",
         "require re-authorization",
