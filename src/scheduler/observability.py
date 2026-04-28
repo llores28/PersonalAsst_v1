@@ -34,10 +34,14 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
-from apscheduler import JobOutcome, JobReleased
-
+# Note: apscheduler imports are deferred to listener-side functions only.
+# This module is also imported by the dashboard's orchestration-api container
+# (which intentionally does NOT install apscheduler — that's an
+# assistant-container dep) for `get_health_snapshot()` read-side access.
+# Importing apscheduler at module top would break the dashboard endpoint
+# with `ModuleNotFoundError: No module named 'apscheduler'`.
 if TYPE_CHECKING:
-    from apscheduler import AsyncScheduler
+    from apscheduler import AsyncScheduler, JobOutcome, JobReleased
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +53,10 @@ def _health_key(schedule_id: str) -> str:
     return f"{_HEALTH_KEY_PREFIX}{schedule_id}"
 
 
-def _outcome_to_status(outcome: JobOutcome) -> str:
+def _outcome_to_status(outcome: "JobOutcome") -> str:
     """Map JobOutcome enum to a stable string for log/JSON consumption."""
-    return outcome.name if isinstance(outcome, JobOutcome) else str(outcome)
+    from apscheduler import JobOutcome as _JO  # local import; see module note
+    return outcome.name if isinstance(outcome, _JO) else str(outcome)
 
 
 async def _read_record(redis: Any, schedule_id: str) -> dict:
@@ -78,10 +83,11 @@ async def _read_record(redis: Any, schedule_id: str) -> dict:
     }
 
 
-def _apply_event(record: dict, event: JobReleased) -> dict:
+def _apply_event(record: dict, event: "JobReleased") -> dict:
     """Pure-function update — no I/O. Easy to unit-test."""
+    from apscheduler import JobOutcome as _JO  # local import; see module note
     status = _outcome_to_status(event.outcome)
-    is_success = event.outcome == JobOutcome.success
+    is_success = event.outcome == _JO.success
 
     duration_ms: Optional[int] = None
     if event.started_at is not None:
@@ -120,12 +126,13 @@ async def _persist_record(redis: Any, schedule_id: str, record: dict) -> None:
         )
 
 
-def _structured_log(event: JobReleased, record: dict) -> None:
+def _structured_log(event: "JobReleased", record: dict) -> None:
     """Emit one structured log line per job release.
 
     Format chosen so log aggregators can extract `consecutive_failures` for
     alerting (e.g. "alert when ANY job >= 3 consecutive failures").
     """
+    from apscheduler import JobOutcome as _JO  # local import; see module note
     fields = {
         "evt": "scheduler.job_released",
         "schedule_id": record["schedule_id"],
@@ -136,12 +143,12 @@ def _structured_log(event: JobReleased, record: dict) -> None:
     }
     if record["last_error"]:
         fields["error"] = record["last_error"]
-    is_failure = event.outcome != JobOutcome.success
+    is_failure = event.outcome != _JO.success
     log_fn = logger.warning if is_failure else logger.info
     log_fn("scheduler.job_released %s", json.dumps(fields, default=str))
 
 
-async def _on_job_released(event: JobReleased) -> None:
+async def _on_job_released(event: "JobReleased") -> None:
     """Single subscription callback. Importing redis lazily keeps tests
     decoupled (they patch get_redis directly)."""
     schedule_id = event.schedule_id or f"adhoc:{event.task_id}"
@@ -166,7 +173,8 @@ def register_scheduler_health_listener(scheduler: "AsyncScheduler") -> None:
     line, so callers (currently `start_scheduler`) should only call this once
     per scheduler instance.
     """
-    scheduler.subscribe(_on_job_released, JobReleased)
+    from apscheduler import JobReleased as _JR  # local import; see module note
+    scheduler.subscribe(_on_job_released, _JR)
     logger.info("Scheduler health listener registered (JobReleased)")
 
 

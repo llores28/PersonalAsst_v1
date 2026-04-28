@@ -18,6 +18,12 @@ psycopg2-binary
 # Redis (async quality scores + health check)
 redis
 
+# Retry/backoff — required transitively by src/memory/conversation (DLQ on
+# session-compaction) and src/scheduler/maintenance (per-user retry on
+# memory eviction). The dashboard's /api/health/scheduler endpoint imports
+# get_redis from src/memory/conversation, which pulls tenacity at module load.
+tenacity
+
 # Telegram (for sending test notifications)
 aiogram
 

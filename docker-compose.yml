@@ -37,6 +37,11 @@ services:
       - TOOL_SUBPROCESS_TIMEOUT=${TOOL_SUBPROCESS_TIMEOUT:-30}
       - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      # Forwarded so settings.workspace_mcp_signing_key is populated and the
+      # startup-warning hook in src/main.py:_check_workspace_mcp_persistence
+      # can detect a missing key. The actual encryption happens in the
+      # workspace-mcp container, but the assistant validates configuration.
+      - WORKSPACE_MCP_SIGNING_KEY=${WORKSPACE_MCP_SIGNING_KEY:-}
       - WORKSPACE_MCP_URL=http://workspace-mcp:8000/mcp
       - LINKEDIN_EMAIL=${LINKEDIN_EMAIL:-}
       - LINKEDIN_PASSWORD=${LINKEDIN_PASSWORD:-}
