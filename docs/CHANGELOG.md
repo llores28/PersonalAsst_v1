@@ -1,5 +1,60 @@
 # Changelog
 
+## 2026-04-29 — Wave A/B/C cohesion sweep + sibling-clone Nexus refactor + 3 PyPI extracts
+
+A multi-front sweep that closed the Wave 5 dangling-modules gap, modernized the `nexus journal` dashboard, surfaced previously-orphaned Redis state via three new Telegram commands, untangled the nested-Nexus repo confusion, and packaged Atlas's three most-reusable safety primitives as standalone PyPI libraries.
+
+### Added — Three new Telegram commands (Wave A.1)
+Commands surface previously-orphaned Redis state that the meta-reflector and repair pipelines were writing to but no human-facing surface read from:
+- **`/meta`** — review pending meta-reflector proposals (skills to retire/consolidate, persona refinements, skill patches). Reads `meta_reflector_pending:{user_id}` (7-day TTL). `/meta clear` to dismiss.
+- **`/repair_status`** — show the active repair-pipeline FSM checkpoint with phase, step, recent transitions, and trigger error. Reads `repair_checkpoint:{user_id}` (24h TTL). Lets the owner see where a repair flow got to after a container restart.
+- **`/refinement`** — non-destructively peek at queued low-quality turns (quality_score < 0.4) awaiting meta-reflector review. Reads `skill_refinement_queue:{user_id}` (14-day TTL).
+Plus help-text updates and `BotCommand` registration in [src/main.py](../src/main.py).
+
+### Added — Deterministic safety floor under LLM repair QA (Wave A.2)
+[src/agents/subtask_verifier.py](../src/agents/subtask_verifier.py) is now installed on the repair pipeline's FSM at the OBSERVE→ACT boundary. Even when the LLM `quality_control_agent` returns GO, four pure-Python predicates run:
+1. `check_security_patterns` — regex set for `eval(`, `exec(`, `shell=True`, `os.system`, hardcoded secrets, `pickle.loads`, unsafe `yaml.load`.
+2. `check_patch_applies` — dry-run output must indicate the patch applies cleanly.
+3. `check_test_commands_allowlisted` — fix's test plan can only invoke `pytest`, `python -m pytest`, etc.
+4. `check_files_in_scope` — patch can only touch files declared in `affected_files`.
+Any BLOCKER fail overrides the LLM GO and rejects the patch ([src/repair/engine.py](../src/repair/engine.py) lines 1268-1322). The result feeds back into the FSM history so the dashboard's repair view sees both the LLM verdict and the deterministic verdict.
+
+### Added — Hybrid lexical+vector skill retrieval (Wave A.2)
+[src/skills/fts5_index.py](../src/skills/fts5_index.py) wired into [src/skills/registry.py](../src/skills/registry.py) `match_skills()` as opt-in via new setting `skill_fts_enabled` (default `False`). Lazy SQLite FTS5 BM25 index over each skill's name/description/tags/routing_hints/instructions. Rebuilt opportunistically on register/unregister via dirty flag. Degrades silently to keyword-only matching on any FTS5 error. Closes the gap where the existing tag matcher missed fuzzy phrasings of the right intent.
+
+### Added — Modernized dashboard generator (Wave B+C — landed in `llores28/Nexus#3`)
+The `nexus journal export` HTML output gets a 2026-era refresh while preserving the self-contained-file invariant (no CDN). Dark/light theme toggle with `localStorage` persistence, Cmd+K command palette with subsequence fuzzy search, mobile-first responsive (card-stack tables under 640px), full ARIA + semantic HTML5, inline SVG sparklines for cost/quality trends, optional fetch of `/api/dashboard` with offline-first fallback, WebSocket subscriber for live audit-trail tail, "View Live" header link to the React dashboard at `localhost:3001`. Empty "What's Next"/"Blockers" cards now collapse instead of showing placeholder text. Session-log summary truncation expanded 70→160 chars. The change lives upstream in the Nexus repo (PR #3); Atlas consumes it via the editable `pip install -e ../Nexus` install.
+
+### Changed — Nexus moved from nested to sibling clone
+The `Nexus/` toolkit was previously a nested git checkout at `d:/PyProjects/PersonalAsst/Nexus/` with its own `.git`. The setup created two `.git` directories under one tree, IDE context bleed, accidental cross-repo commits, a behavioral memory rule ("don't commit Nexus from PersonalAsst"), and risked Dockerfile bloat. **Refactored to a sibling clone** at `d:/PyProjects/Nexus/` with `pip install -e ../Nexus`. Boundary is now physical, not behavioral.
+- [.gitignore](../.gitignore): 4 stale Nexus entries (`bootstrap/`, `Nexus/`, `bootstrap/Nexus/`, `bootstrap-backup*/`) replaced with one `Nexus.archive-*/` line.
+- [requirements-dev.txt](../requirements-dev.txt): note explaining `-e ../Nexus` is host-only and must NOT be added here (the dev Docker stage installs this file; build context can't see the parent).
+- [CLAUDE.md](../CLAUDE.md): path references updated; explicit note that Nexus is dev-time only and NOT bundled into Atlas's production Docker image.
+- [docs/RUNBOOK.md](RUNBOOK.md): new "First-time setup" section documenting the sibling-clone recipe and Cloud Run cleanliness rationale.
+- Production Docker audit confirmed: the `prod` stage installs only `requirements.txt`, never sees Nexus, never bundles the sibling clone. **Cloud Run deployment path is unblocked.**
+- `nexus-bootstrap` upgraded 0.1.0 → 0.2.0 (the sibling reclone pulled latest upstream including new `doctor`, `generate`, `profile` commands).
+- The previous nested layout is preserved as `Nexus.archive-2026-04-29/` (gitignored, deletable once verified in production).
+
+### Added — Three standalone PyPI packages (Wave 5)
+Atlas's three most-reusable safety primitives extracted to `packages/`:
+- **`agent-poison-filter`** — regex+substring detector for self-reinforcing failure loops (MINJA / OWASP procedural drift). 5 smoke tests.
+- **`mem0-park-scoring`** — Park et al. 2023 scoring (`0.45·recency + 0.25·access + 0.30·importance`) + 8000-cap eviction selector + summary chunker. 6 smoke tests.
+- **`agent-action-policy`** — 4-tier classifier (read/draft/internal_write/external_side_effect) + contextual confirmation matcher. Framework-agnostic. 13 smoke tests.
+Each package: `pyproject.toml` + `src/` layout + smoke tests + MIT LICENSE + README. Atlas remains the canonical implementation; these let other agent frameworks (LangGraph, OpenClaw, Hermes, Claude Agent SDK) adopt the patterns without forking.
+
+### Fixed — agentskills.io conformance (Wave 3.8)
+Two real bugs in existing skills surfaced and fixed by [tests/test_skill_format_compliance.py](../tests/test_skill_format_compliance.py):
+- `src/user_skills/devotional-style-guide/SKILL.md`: `tags:` was inline-unquoted-string, parsed as non-list. Fixed to multi-line YAML list.
+- `src/user_skills/pdf-generator-and-extractor/SKILL.md`: `tags:` had multi-items-on-one-line YAML. Fixed to one-item-per-line.
+Plus deletion of `src/user_skills/{ffmpeg-video-composition,video-processing}/` (deprecated, no longer referenced).
+
+### Test infrastructure
+16 new test files, +4269 lines: `test_subtask_verifier`, `test_repair_checkpoint`, `test_skill_writeback`, `test_meta_reflector`, `test_skill_self_improvement`, `test_fsm`, `test_adversarial_harness`, `test_skill_format_compliance`, `test_fts5_skill_index`, `test_atlas_mcp_tools`, `test_typing_indicator`, `test_voice_reply_formatting`, `test_workspace_routing_harness`, `tests/integration/test_live_workspace_smoke.py`, plus `scripts/test_workspace_routing.py` (CLI harness with `--live` flag for read-only probe against real workspace).
+
+**Suite at the time of this entry: 1297 passed, 14 skipped, 7 xfailed.**
+
+---
+
 ## 2026-04-26 — Cohesion audit fixes (settings symmetry + endpoint disambiguation)
 
 A deep audit surfaced three gaps and three observability holes in the post-cleanup state. Net: zero blockers, but several places where the system *looked* configured but wasn't fully wired. Closed all six in this commit.

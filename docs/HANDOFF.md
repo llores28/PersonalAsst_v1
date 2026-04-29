@@ -2,9 +2,22 @@
 
 ## Current Status
 
-**Phase:** All core phases (1–9) + Dashboard Enhancements (Phases 1–8) implemented and operational  
-**Date:** April 26, 2026  
-**Test suite:** **1096 passing / 0 failing** / 6 skipped / 7 xfailed. Cleared the entire 47-failure backlog in this session (org-agent FunctionTool isolation pollution + tool-count drift + fastapi-optional skips + bot/orgs wizard refactor + pricing relocation + alembic path + codex retirement + skill-frozen contract + tool-factory growth + dry-run rewrite + sandbox marker + ATTEMPT_COUNTS pollution). The 6 skipped are intentional (fastapi-conditional dashboard tests).
+**Phase:** All core phases (1–9) + Dashboard Enhancements (Phases 1–8) + Wave A/B/C cohesion sweep + sibling-clone Nexus refactor + 3 PyPI extracts implemented and operational
+**Date:** April 29, 2026
+**Test suite:** **1297 passing / 0 failing** / 14 skipped / 7 xfailed. Net +201 tests since 2026-04-26 across 16 new test files: subtask_verifier (21), repair_checkpoint (9), skill_writeback, meta_reflector, skill_self_improvement, fsm (13), adversarial_harness (31), skill_format_compliance, fts5_skill_index (18), atlas_mcp_tools (16), typing_indicator, voice_reply_formatting, workspace_routing_harness (43), live_workspace_smoke (gated), plus the existing suite.
+
+### Recently shipped (2026-04-29)
+- **3 new Telegram commands** (`/meta`, `/repair_status`, `/refinement`) surface previously-orphaned Redis state. See [src/bot/handlers.py](../src/bot/handlers.py) (cmd_meta, cmd_repair_status, cmd_refinement) and [src/main.py](../src/main.py) (BotCommand registration).
+- **Deterministic safety floor under LLM repair QA** — [src/agents/subtask_verifier.py](../src/agents/subtask_verifier.py) installed via [src/agents/fsm.py](../src/agents/fsm.py) `set_verifier()` at the OBSERVE→ACT boundary in [src/repair/engine.py](../src/repair/engine.py) lines 1268-1322. Even when LLM QA returns GO, BLOCKER predicates (security regex, dry-run, files-in-scope, test-allowlist) override and reject.
+- **Hybrid lexical+vector skill retrieval** — [src/skills/fts5_index.py](../src/skills/fts5_index.py) opt-in via `settings.skill_fts_enabled`. Lazy SQLite FTS5 BM25 index over name/description/tags/routing_hints/instructions; rebuilt on register/unregister.
+- **Plan→Act→Observe→Revise FSM** — [src/agents/fsm.py](../src/agents/fsm.py) generic FSM with `Phase` enum, `FSMRunner`, `TransitionVerifier` hook, JSON snapshot round-trip. Used by repair pipeline; Redis checkpoint at `repair_checkpoint:{user_id}` (24h TTL) via the `on_transition` hook.
+- **Meta-reflector** — [src/agents/meta_reflector_agent.py](../src/agents/meta_reflector_agent.py) runs every `meta_reflector_interval` turns (default 15), reviews recent reflector outputs + skill_refinement_queue, emits proposals (retire/consolidate/refine/persona) to `meta_reflector_pending:{user_id}` for owner review via `/meta`.
+- **Skill writeback** — [src/skills/skill_writer.py](../src/skills/skill_writer.py) crystallizes `workflow_learned` into `src/user_skills/auto/<slug>/SKILL.md` after 3 occurrences (deduped via `crystallize_count` metadata in Mem0).
+- **Atlas MCP surface** — [src/integrations/atlas_mcp_tools.py](../src/integrations/atlas_mcp_tools.py) exposes 3 read-only deterministic short-circuits (calendar, unread Gmail, tasks) as MCP tool contracts via `start_atlas_mcp_server()` (lazy fastmcp import; opt-in dep).
+- **Modernized dashboard generator** (lives upstream in [llores28/Nexus#3](https://github.com/llores28/Nexus/pull/3); Atlas consumes via editable `pip install -e ../Nexus`). Theme toggle, Cmd+K palette, mobile-first responsive, ARIA, sparklines, optional `/api/dashboard` fetch with offline-first fallback, WebSocket audit-trail tail, "View Live" link.
+- **Sibling-clone Nexus refactor** — Nexus moved from nested `Nexus/` (broken split layout) to sibling `d:/PyProjects/Nexus/`. Editable install reinstalled at `nexus-bootstrap 0.2.0`. Production Docker image audit confirmed clean; **Cloud Run deployment path is unblocked**. See [docs/RUNBOOK.md](RUNBOOK.md#first-time-setup-local-dev-machine).
+- **Three standalone PyPI packages** under [`packages/`](../packages/) — `agent-poison-filter`, `mem0-park-scoring`, `agent-action-policy`. Framework-agnostic extracts of Atlas's reusable safety primitives. 24 smoke tests across the three.
+- **Wave 3.8 agentskills.io conformance** — fixed two real bugs in existing skills (devotional-style-guide tag list, pdf-generator multi-items-on-one-line). Added [tests/test_skill_format_compliance.py](../tests/test_skill_format_compliance.py).
 
 ### Recently shipped (2026-04-26)
 - **Memory eviction** — nightly job (03:00 UTC) caps per-user Mem0 memories at 8000 with summarize-then-delete. Code in [src/memory/eviction.py](../src/memory/eviction.py), [src/memory/eviction_runner.py](../src/memory/eviction_runner.py), wired in [src/scheduler/maintenance.py](../src/scheduler/maintenance.py).
@@ -19,7 +32,7 @@
 | Research document | Complete | `RESEARCH_PersonalAssistant.md` — 21 sections, gaps analysis |
 | PRD | Complete | `PRD_PersonalAssistant.md` — 18 sections, all gaps resolved |
 | Bootstrap | Complete | Team tier bootstrap plus VS Code migration scaffolding for instructions, prompts, and tasks |
-| Nexus CLI toolkit | **v0.2.0** | Synced to upstream `65b60ff` (2026-04-25); adds `journal` subcommand for cross-session state tracking. See `docs/CHANGELOG.md`. |
+| Nexus CLI toolkit | **v0.2.0** (sibling-clone) | Installed editable from `d:/PyProjects/Nexus/` via `pip install -e ../Nexus`. Production Docker image does NOT bundle Nexus (`requirements.txt` only). See [docs/RUNBOOK.md](RUNBOOK.md#first-time-setup-local-dev-machine). Modernized dashboard generator pending merge as [llores28/Nexus#3](https://github.com/llores28/Nexus/pull/3). |
 | Source code | **Complete** | `src/` — 19 agent files, 10 skills, scheduler, memory, tools (+ credential vault), security |
 | Docker Compose | **Running** | 5 services: assistant, postgres, qdrant, redis, workspace-mcp |
 | Tests | **493+ passing** | 20 test files covering agents, tools, guardrails, scheduling, memory |

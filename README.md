@@ -28,7 +28,17 @@ A self-improving, multi-agent Personal Assistant that runs in Docker and talks t
 - **Stale Session Recovery** — Automatic detection and clearing of corrupt SDK sessions with transparent retry.
 - **Fully Self-Hosted** — All databases run in Docker. Zero SaaS calls for data storage.
 
-## Latest Updates (2026-04-23) — src/ Consolidation + Self-Healing Agent Triad
+## Latest Updates (2026-04-29) — Wave A/B/C cohesion sweep + sibling-clone Nexus refactor
+
+- **3 new Telegram commands** — `/meta` (review meta-reflector proposals), `/repair_status` (show active repair FSM checkpoint), `/refinement` (peek at queued low-quality turns awaiting review). Surface previously-orphaned Redis state.
+- **Deterministic safety floor under LLM repair QA** — [src/agents/subtask_verifier.py](src/agents/subtask_verifier.py) installed at the FSM's OBSERVE→ACT boundary. Even when the LLM `quality_control_agent` returns GO, four pure-Python predicates (security patterns, patch dry-run, files-in-scope, test-command allowlist) can override and reject the patch. Closes a real gap where the LLM occasionally signed off on `eval()`/`shell=True` patches.
+- **Hybrid lexical+vector skill retrieval** — [src/skills/fts5_index.py](src/skills/fts5_index.py) wired into `SkillRegistry.match_skills()` as opt-in via `skill_fts_enabled` setting. SQLite stdlib FTS5 BM25 over name/description/tags/routing_hints/instructions; degrades silently to keyword-only matching.
+- **Modernized dashboard generator** (lives in [llores28/Nexus#3](https://github.com/llores28/Nexus/pull/3)) — dark/light theme toggle, Cmd+K command palette, mobile-first responsive (card-stack tables under 640px), full ARIA + semantic HTML5, inline SVG sparklines, optional `/api/dashboard` fetch with offline-first fallback, WebSocket audit-trail tail, "View Live" link to React dashboard. Self-contained-file invariant preserved (no CDN).
+- **Sibling-clone Nexus refactor** — Nexus moved from nested `Nexus/` to sibling `../Nexus/`. Production Docker image audit confirmed clean (the `prod` stage installs only `requirements.txt`, never sees Nexus). **Cloud Run deployment path is unblocked.** See [docs/RUNBOOK.md](docs/RUNBOOK.md#first-time-setup-local-dev-machine) for the new first-time-setup recipe.
+- **Three standalone PyPI packages** (under [`packages/`](packages/)) — `agent-poison-filter`, `mem0-park-scoring`, `agent-action-policy`. Framework-agnostic extracts of Atlas's reusable safety primitives so LangGraph/OpenClaw/Hermes/Claude Agent SDK users can adopt them without forking.
+- **Test growth** — 16 new test files, +4269 lines. Suite at 1297 passed, 14 skipped, 7 xfailed.
+
+## Earlier Updates (2026-04-23) — src/ Consolidation + Self-Healing Agent Triad
 
 - **src/ consolidation** — `alembic/`, `config/`, `orchestration-ui/`, `user_skills/` all moved INTO `src/` per [ADR-2026-04-13](docs/ADR-2026-04-13-src-consolidation.md). Canonical alembic root is now `src/db/migrations/`.
 - **Self-healing agent triad** — Added `DebuggerAgent`, `ProgrammerAgent`, `QualityControlAgent` to the repair pipeline. RepairAgent now orchestrates Phase 1 (audit) → Phase 2 (diagnose) → Phase 3 (fix plan) → Phase 4 (validation + approval).
