@@ -44,6 +44,164 @@ If you accidentally end up with a nested `Nexus/` checkout under PersonalAsst/, 
 | Redis | `assistant-redis` | `redis-cli ping` | `docker compose restart redis` |
 | Google Workspace MCP | `workspace-mcp` | Container running | `docker compose restart workspace-mcp` |
 
+## Cloud Run deploy (production)
+
+Atlas's production target is Google Cloud Run. The Docker `prod` stage already
+builds clean (audited 2026-04-29 — Nexus dev-time tooling is NOT bundled).
+The deploy pipeline lives in [cloudbuild.yaml](../cloudbuild.yaml) +
+[.gcloudignore](../.gcloudignore) and fires on every push to `main` once the
+GitHub trigger is connected.
+
+### Architecture
+
+| Service | Cloud Run config | Why |
+|---|---|---|
+| `atlas-bot` | min=1, max=1, no-cpu-throttling, 2vCPU/2GiB, $no-allow-unauthenticated$ | Telegram long-polling: getUpdates returns 409 with two consumers; CPU throttling stalls polling between calls |
+| `atlas-api` | min=0, max=5, 1vCPU/1GiB, $no-allow-unauthenticated$ | Scale-to-zero FastAPI; serves the React dashboard via private service-to-service call |
+| `workspace-mcp` | min=0, max=1, ingress=internal | Sidecar OAuth token store; private; bot calls via service-to-service ID token |
+| Cloud SQL Postgres | `db-f1-micro`, ~$9/mo | Atlas's relational store (orgs/agents/tasks/etc.) |
+| Redis (recommended: Upstash) | Serverless HTTP, ~$0–3/mo | Session state + meta-reflector counter + repair checkpoint. Upstash beats Memorystore by ~$25/mo for single-user (no VPC connector tax). |
+| Qdrant Cloud | Free tier | Mem0 vector store |
+
+### One-time provisioning (run once per project)
+
+#### Step 1 — GCP project + IAM + Secret Manager
+
+```bash
+# Create the project (or use an existing one)
+gcloud projects create atlas-prod-XXXX --name="Atlas (PersonalAsst)"
+gcloud config set project atlas-prod-XXXX
+gcloud auth login
+gcloud auth application-default login    # for Application Default Credentials
+
+# One-shot provisioning of APIs + Artifact Registry + IAM + Secret Manager.
+# Reads .env if present so secrets are pre-populated.
+bash scripts/provision-gcp.sh us-central1
+```
+
+The script enables the 5 required APIs (cloudbuild, run, artifactregistry,
+secretmanager, sqladmin), creates the `atlas-images` Artifact Registry repo,
+grants the Cloud Build service account 4 IAM roles, and creates 11 Secret
+Manager entries (populated from your local `.env` if available, or
+`REPLACE_ME_*` placeholders otherwise).
+
+#### Step 2 — Provision the data layer
+
+**Cloud SQL Postgres** (~$9/mo for db-f1-micro):
+```bash
+gcloud sql instances create atlas-pg \
+    --database-version=POSTGRES_17 \
+    --tier=db-f1-micro \
+    --region=us-central1 \
+    --root-password=TEMP_CHANGE_ME
+
+gcloud sql databases create atlas --instance=atlas-pg
+gcloud sql users create assistant --instance=atlas-pg --password=GENERATED_PASSWORD
+
+# Build the DATABASE_URL and store in Secret Manager.
+INSTANCE_CONN="$(gcloud sql instances describe atlas-pg --format='value(connectionName)')"
+DB_URL="postgresql://assistant:GENERATED_PASSWORD@/atlas?host=/cloudsql/${INSTANCE_CONN}"
+echo -n "$DB_URL" | gcloud secrets versions add database-url --data-file=-
+```
+
+Then add `--add-cloudsql-instances=$INSTANCE_CONN` to the bot + api `gcloud
+run deploy` steps in `cloudbuild.yaml` (substitution variable `_DB_INSTANCE`).
+
+**Redis — Upstash (recommended, single-user)**:
+1. Sign up at [upstash.com](https://upstash.com) (free tier covers single-user usage).
+2. Create a Redis database (region: `us-central1` to match GCP).
+3. Copy the "Redis Connect URL" (rediss:// scheme — TLS).
+4. `echo -n "rediss://default:PASSWORD@HOST:PORT" | gcloud secrets versions add redis-url --data-file=-`
+
+**Redis — Memorystore (alternative, ~$44/mo)**:
+```bash
+# Memorystore requires a Serverless VPC Connector (~$9/mo even idle).
+gcloud compute networks vpc-access connectors create atlas-vpc \
+    --region=us-central1 --range=10.8.0.0/28
+gcloud redis instances create atlas-redis \
+    --size=1 --region=us-central1 --tier=basic --redis-version=redis_7_0
+
+REDIS_HOST="$(gcloud redis instances describe atlas-redis --region=us-central1 --format='value(host)')"
+REDIS_PORT="$(gcloud redis instances describe atlas-redis --region=us-central1 --format='value(port)')"
+echo -n "redis://${REDIS_HOST}:${REDIS_PORT}" | gcloud secrets versions add redis-url --data-file=-
+```
+Add `--vpc-connector=atlas-vpc --vpc-egress=private-ranges-only` to the
+`gcloud run deploy` steps in cloudbuild.yaml.
+
+**Qdrant Cloud (free tier covers single-user)**:
+1. Sign up at [cloud.qdrant.io](https://cloud.qdrant.io).
+2. Create a free-tier cluster (region nearest us-central1).
+3. Copy the cluster URL + API key.
+4. `echo -n "https://YOUR-CLUSTER.qdrant.io" | gcloud secrets versions add qdrant-url --data-file=-`
+5. `echo -n "YOUR_API_KEY" | gcloud secrets versions add qdrant-api-key --data-file=-`
+
+#### Step 3 — Connect Cloud Build to GitHub
+
+This requires interactive GitHub OAuth — do it in the GCP Console:
+1. Open Cloud Build → Triggers → **Connect Repository** → GitHub.
+2. Authorize Google Cloud Build for `llores28/PersonalAsst_v1`.
+3. Create a trigger:
+   - Event: Push to branch
+   - Source: `^main$`
+   - Configuration: Cloud Build configuration file (yaml or json)
+   - Location: Repository / `cloudbuild.yaml`
+
+Or via CLI (after the GitHub connection is authorized once via Console):
+```bash
+gcloud builds triggers create github \
+    --repo-name=PersonalAsst_v1 \
+    --repo-owner=llores28 \
+    --branch-pattern=^main$ \
+    --build-config=cloudbuild.yaml \
+    --name=atlas-deploy-main
+```
+
+#### Step 4 — Verify and deploy
+
+```bash
+# Check that all secrets have real values (not REPLACE_ME_*).
+for s in telegram-bot-token openai-api-key google-oauth-client-id \
+         google-oauth-client-secret workspace-mcp-signing-key mem0-api-key \
+         database-url redis-url qdrant-url qdrant-api-key dashboard-api-key; do
+    val=$(gcloud secrets versions access latest --secret=$s 2>/dev/null)
+    if [[ $val == REPLACE_ME_* ]]; then echo "  TODO: $s"; fi
+done
+
+# Trigger the first deploy by pushing an empty commit (or any push to main).
+git commit --allow-empty -m "trigger: first Cloud Run deploy"
+git push origin main
+
+# Tail the build:
+gcloud builds list --limit=1 --format='value(id)' | xargs -I {} gcloud builds log {} --stream
+
+# After build succeeds, smoke-test the bot by sending /help in Telegram.
+# Smoke-test the API:
+gcloud run services describe atlas-api --region=us-central1 --format='value(status.url)'
+# → curl that URL with X-API-Key header.
+```
+
+### Cost expectations (single-user, ~100 messages/day)
+
+| Component | Monthly cost |
+|---|---|
+| atlas-bot (min=1, always-on) | ~$14–18 |
+| atlas-api (scale-to-zero) | ~$1 |
+| workspace-mcp (scale-to-zero) | ~$0.50 |
+| Cloud SQL Postgres (db-f1-micro) | ~$9 |
+| Redis — **Upstash** | ~$0–3 |
+| Redis — Memorystore + VPC connector | ~$44 |
+| Qdrant Cloud (free tier) | $0 |
+| Secret Manager (10 secrets, low access) | <$0.30 |
+| Cloud Build (within free 2,500 min/month) | $0 |
+| **Total with Upstash** | **~$25–32/mo** |
+| **Total with Memorystore** | **~$66–73/mo** |
+
+### Three deploy pitfalls to avoid
+
+1. **Forgetting `--no-cpu-throttling` on the bot** → polling stalls mid-getUpdates → 30–60s response gaps. Already pinned in cloudbuild.yaml.
+2. **Letting `--max-instances` default to 100** → during redeploy, old+new instance both call getUpdates → Telegram returns 409 Conflict → bot bans polling for ~10 min. Already pinned to `--max-instances=1` in cloudbuild.yaml.
+3. **Using Memorystore + VPC connector for single-user** → +$25/mo for zero functional benefit. Use Upstash unless your traffic justifies VPC-private Redis.
+
 ## Common Operations
 
 ### Start Everything
