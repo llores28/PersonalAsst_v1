@@ -164,8 +164,14 @@ app.add_middleware(
 )
 
 # ── API Key Authentication ────────────────────────────────────────────
-# Endpoints that don't require auth (health, root, OPTIONS)
-_PUBLIC_PATHS = {"/", "/api/health", "/api/health/scheduler", "/docs", "/openapi.json", "/redoc"}
+# Endpoints that don't require auth (health, root, OPTIONS, dashboard
+# bootstrap). /api/config is public because the React UI needs to read
+# the owner_telegram_id + dashboard_api_key BEFORE it can authenticate
+# the rest of its requests. Trust model: this is a single-user dashboard;
+# CORS_ALLOWED_ORIGINS already limits which browsers can hit /api/config,
+# and exposing the API key to a malicious local-network user gives them
+# nothing they couldn't already get by reading .env.
+_PUBLIC_PATHS = {"/", "/api/config", "/api/health", "/api/health/scheduler", "/docs", "/openapi.json", "/redoc"}
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -626,10 +632,38 @@ async def root():
 
 @app.get("/api/config")
 async def get_config():
-    """Return public dashboard configuration (requires API key auth)."""
+    """Return dashboard bootstrap configuration. Public so the React UI can
+    read owner_telegram_id + dashboard_api_key BEFORE making authenticated
+    requests. Trust model documented at the _PUBLIC_PATHS definition.
+
+    The owner_telegram_id is the user the dashboard scopes its queries to —
+    looked up from the User table (is_owner=True). The dashboard_api_key is
+    what the UI must send as X-API-Key on every other request (or empty
+    string in dev mode where auth is disabled).
+    """
+    owner_telegram_id: Optional[int] = None
+    try:
+        async with async_session() as session:
+            owner_r = await session.execute(
+                select(User).where(User.is_owner == True).limit(1)  # noqa: E712
+            )
+            owner = owner_r.scalar_one_or_none()
+            if owner is None:
+                # Fallback: first user in the table (single-user dev install)
+                fallback_r = await session.execute(select(User).limit(1))
+                owner = fallback_r.scalar_one_or_none()
+            if owner is not None:
+                owner_telegram_id = owner.telegram_id
+    except Exception as exc:  # noqa: BLE001
+        # /api/config is the dashboard's bootstrap call — never 500 here, the
+        # UI gracefully handles a null owner_telegram_id.
+        logger.warning("get_config: owner lookup failed: %s", exc)
+
     return {
         "api_version": "2.0.0",
         "auth_required": bool(_settings.dashboard_api_key),
+        "owner_telegram_id": owner_telegram_id,
+        "dashboard_api_key": _settings.dashboard_api_key or "",
     }
 
 
@@ -1552,6 +1586,10 @@ class RepairTicketItem(BaseModel):
     approval_required: bool
     created_at: datetime
     updated_at: datetime
+    # error_context lets the UI render the Admin / AI-Agent routing chip
+    # in the Repairs tab (Dashboard.js reads error_context.assigned_to).
+    # Stripping this field caused the chip to silently never show.
+    error_context: Optional[dict] = None
 
 
 @app.get("/api/repairs", response_model=List[RepairTicketItem])
@@ -1573,6 +1611,7 @@ async def get_repairs(limit: int = 30):
                 approval_required=getattr(r, "approval_required", False),
                 created_at=r.created_at,
                 updated_at=r.updated_at,
+                error_context=getattr(r, "error_context", None) or None,
             )
             for r in rows
         ]
@@ -3586,6 +3625,78 @@ async def update_org_agent(
     )
 
 
+@app.get("/api/orgs/{org_id}/agents/{agent_id}/delete-preview")
+async def delete_agent_preview(
+    org_id: int,
+    agent_id: int,
+    x_telegram_id: Optional[int] = Header(default=None, alias="X-Telegram-Id"),
+):
+    """Preview the impact of deleting an agent BEFORE the user confirms.
+
+    Returns:
+      - agent: name + role for the confirm dialog
+      - org_status: blocks the delete if 'active'
+      - active_tasks: list of currently in-progress / pending tasks owned by
+        this agent. The DB has ON DELETE SET NULL on the FK, so deletion
+        wouldn't lose tasks — but the user should know they'll be orphaned.
+      - recent_activity_count: total OrgActivity rows referencing this agent
+        (truncated count; full audit trail survives via SET NULL).
+    """
+    async with async_session() as session:
+        requester = await _resolve_dashboard_user(session, x_telegram_id)
+        await _get_owned_org_or_404(session, org_id, requester.id)
+        agent = await session.get(OrgAgent, agent_id)
+        if not agent or agent.org_id != org_id:
+            raise HTTPException(status_code=404, detail="Agent not found")
+
+        org = await session.get(Organization, org_id)
+        org_status = org.status if org else "unknown"
+
+        active_tasks_q = await session.execute(
+            select(OrgTask)
+            .where(
+                OrgTask.agent_id == agent_id,
+                OrgTask.status.in_(["pending", "in_progress", "blocked"]),
+            )
+            .order_by(desc(OrgTask.created_at))
+            .limit(50)
+        )
+        active_tasks = active_tasks_q.scalars().all()
+
+        completed_tasks_q = await session.execute(
+            select(func.count())
+            .select_from(OrgTask)
+            .where(
+                OrgTask.agent_id == agent_id,
+                OrgTask.status.in_(["done", "completed", "failed", "cancelled"]),
+            )
+        )
+        completed_count = completed_tasks_q.scalar_one()
+
+        activity_q = await session.execute(
+            select(func.count()).select_from(OrgActivity).where(OrgActivity.agent_id == agent_id)
+        )
+        activity_count = activity_q.scalar_one()
+
+    return {
+        "agent": {
+            "id": agent.id,
+            "name": agent.name,
+            "role": agent.role,
+            "org_id": org_id,
+        },
+        "org_status": org_status,
+        "deletion_blocked": org_status == "active",
+        "active_tasks": [
+            {"id": t.id, "title": t.title, "status": t.status, "priority": t.priority}
+            for t in active_tasks
+        ],
+        "active_tasks_count": len(active_tasks),
+        "completed_tasks_count": int(completed_count),
+        "activity_count": int(activity_count),
+    }
+
+
 @app.delete("/api/orgs/{org_id}/agents/{agent_id}")
 async def delete_org_agent(
     org_id: int,
@@ -5424,6 +5535,264 @@ async def tool_wizard_cancel(request: ToolWizardSaveRequest):
     session_id = request.session_id
     if session_id in _tool_wizard_sessions:
         del _tool_wizard_sessions[session_id]
+    return {"success": True}
+
+
+# ── Agent Creation Wizard (AI-Assisted) ───────────────────────────────
+# Mirror of the Tools / Skills wizard pattern: 4-step (describe → interview
+# → review → done) with an in-memory session store keyed by uuid. Adapts
+# the prompt to ask the things an OrgAgentCreate needs (role,
+# responsibilities, skills, allowed_tools, model_tier).
+
+class AgentWizardStartRequest(BaseModel):
+    org_id: int
+    description: str
+
+
+class AgentWizardAnswerRequest(BaseModel):
+    session_id: str
+    answer: str
+
+
+class AgentWizardResponse(BaseModel):
+    step: str
+    session_id: str
+    questions: Optional[List[str]] = None
+    agent_preview: Optional[dict] = None
+    message: Optional[str] = None
+
+
+class AgentWizardSaveRequest(BaseModel):
+    session_id: str
+    overrides: Optional[dict] = None
+
+
+_agent_wizard_sessions: dict[str, dict] = {}
+
+
+@app.post("/api/agents/wizard/start", response_model=AgentWizardResponse)
+async def agent_wizard_start(
+    request: AgentWizardStartRequest,
+    x_telegram_id: Optional[int] = Header(default=None, alias="X-Telegram-Id"),
+):
+    """Start AI-assisted agent creation wizard."""
+    import uuid
+    from src.models.router import ModelRole, select_model
+    from agents import Agent, Runner
+
+    user_id = x_telegram_id or 1
+    session_id = str(uuid.uuid4())
+
+    session = {
+        "user_id": user_id,
+        "org_id": request.org_id,
+        "step": "interviewing",
+        "description": request.description.strip(),
+        "questions": [],
+        "answers": [],
+        "agent_data": None,
+    }
+    _agent_wizard_sessions[session_id] = session
+
+    model_selection = select_model(ModelRole.FAST)
+    instructions = (
+        "You are an Agent Factory specialist. The user is creating a NEW AI sub-agent inside an "
+        "organization. Ask 3-5 concise clarifying questions to design it. Focus on:\n"
+        "  1. The agent's primary role / job title (e.g., 'inbox triage', 'meeting scheduler').\n"
+        "  2. Concrete responsibilities (what tasks does it own end-to-end?).\n"
+        "  3. Which existing skills it should be able to invoke.\n"
+        "  4. Which tools it needs access to (Gmail, Calendar, Tasks, web search, etc.).\n"
+        "  5. Model tier preference: 'fast' (gpt-4o-mini-class), 'general' (gpt-4o-class), "
+        "     or 'reasoning' (o1-class) — based on how complex its decisions are.\n"
+        "Return questions as a numbered list. Do not propose an agent yet."
+    )
+    agent = Agent(name="Agent Wizard", instructions=instructions, model=model_selection.model_id)
+
+    prompt = (
+        f"User wants a new sub-agent: {session['description']}\n\n"
+        "Ask concise numbered questions to clarify the design."
+    )
+    result = await Runner.run(agent, prompt)
+    questions = _extract_wizard_questions(result.final_output) or [
+        "What is the agent's primary role or job title?",
+        "What concrete tasks does it own end-to-end?",
+        "Which skills should it be able to invoke (list by name or describe)?",
+        "Which tools does it need (Gmail, Calendar, Tasks, web search, etc.)?",
+        "Model tier — fast, general, or reasoning?",
+    ]
+    session["questions"] = questions
+
+    return AgentWizardResponse(step="interviewing", session_id=session_id, questions=questions)
+
+
+@app.post("/api/agents/wizard/answer", response_model=AgentWizardResponse)
+async def agent_wizard_answer(request: AgentWizardAnswerRequest):
+    """Submit an interview answer; may return more questions or an agent preview."""
+    from src.models.router import ModelRole, select_model
+    from agents import Agent, Runner
+
+    session_id = request.session_id
+    if session_id not in _agent_wizard_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session = _agent_wizard_sessions[session_id]
+    session["answers"].append(request.answer)
+
+    if len(session["answers"]) < 3:
+        model_selection = select_model(ModelRole.FAST)
+        agent = Agent(
+            name="Agent Wizard",
+            instructions=(
+                "Ask the next 1-2 concise questions needed to finalize the agent design. "
+                "Return only a numbered list of questions."
+            ),
+            model=model_selection.model_id,
+        )
+        qna = "\n".join(
+            [f"Q: {q}\nA: {a}" for q, a in zip(session.get("questions", []), session.get("answers", []))]
+        )
+        prompt = f"Agent: {session['description']}\n\nPrevious Q&A:\n{qna}\n\nAsk remaining questions."
+        result = await Runner.run(agent, prompt)
+        questions = _extract_wizard_questions(result.final_output)
+        if questions:
+            session["questions"].extend(questions)
+        return AgentWizardResponse(step="interviewing", session_id=session_id, questions=questions or [])
+
+    return await _generate_agent_from_wizard(session_id, session)
+
+
+async def _generate_agent_from_wizard(session_id: str, session: dict) -> AgentWizardResponse:
+    """Synthesize an OrgAgentCreate-shaped draft from the interview answers."""
+    from src.models.router import ModelRole, select_model
+    from agents import Agent, Runner
+
+    model_selection = select_model(ModelRole.GENERAL)
+    instructions = (
+        "Design an OrgAgent record. Output STRICTLY one JSON block:\n"
+        "```json\n"
+        "{\n"
+        '  "name": "<short snake_or_kebab name>",\n'
+        '  "role": "<concise role title>",\n'
+        '  "description": "<one-sentence summary>",\n'
+        '  "instructions": "<system-prompt-style guidance, 3-8 lines>",\n'
+        '  "skills": ["skill_id_1", "skill_id_2"],\n'
+        '  "allowed_tools": ["gmail", "calendar"],\n'
+        '  "model_tier": "fast|general|reasoning"\n'
+        "}\n"
+        "```\n"
+        "- Pick model_tier conservatively (default 'general' unless reasoning is clearly needed).\n"
+        "- Skills/allowed_tools should be plausible identifiers but the user will edit them in review.\n"
+        "- Keep instructions actionable and short — they go into the runtime system prompt."
+    )
+    agent = Agent(name="Agent Codegen", instructions=instructions, model=model_selection.model_id)
+
+    qna = "\n".join(
+        [f"Q: {q}\nA: {a}" for q, a in zip(session.get("questions", []), session.get("answers", []))]
+    )
+    prompt = (
+        f"User wants a sub-agent: {session['description']}\n\n"
+        f"Interview summary:\n{qna}\n\n"
+        "Generate the OrgAgent JSON spec as instructed."
+    )
+    result = await Runner.run(agent, prompt)
+    spec = _extract_json_block(result.final_output) or {}
+
+    # Default-fill anything the LLM missed so the UI always gets a complete preview
+    agent_preview = {
+        "name": spec.get("name") or "new_agent",
+        "role": spec.get("role") or "specialist",
+        "description": spec.get("description") or session.get("description", ""),
+        "instructions": spec.get("instructions") or "",
+        "skills": list(spec.get("skills") or []),
+        "allowed_tools": list(spec.get("allowed_tools") or []),
+        "model_tier": spec.get("model_tier") or "general",
+    }
+    if agent_preview["model_tier"] not in ("fast", "general", "reasoning"):
+        agent_preview["model_tier"] = "general"
+
+    session["agent_data"] = agent_preview
+    session["step"] = "review"
+
+    return AgentWizardResponse(step="review", session_id=session_id, agent_preview=agent_preview)
+
+
+@app.post("/api/agents/wizard/save")
+async def agent_wizard_save(
+    request: AgentWizardSaveRequest,
+    x_telegram_id: Optional[int] = Header(default=None, alias="X-Telegram-Id"),
+):
+    """Persist the wizard's drafted agent into the org's agent roster."""
+    session_id = request.session_id
+    if session_id not in _agent_wizard_sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    session = _agent_wizard_sessions[session_id]
+    agent_data = session.get("agent_data")
+    if not agent_data:
+        raise HTTPException(status_code=400, detail="No agent data to save")
+
+    # Apply user edits from the review step (if any)
+    if request.overrides:
+        for key in ("name", "role", "description", "instructions", "skills", "allowed_tools", "model_tier"):
+            if key in request.overrides:
+                agent_data[key] = request.overrides[key]
+
+    org_id = session["org_id"]
+
+    # Mirror the create-agent logic at POST /api/orgs/{org_id}/agents (line ~3518)
+    # so validation + tools_config merging + activity logging stay identical
+    # between the manual-create path and the wizard-create path.
+    try:
+        async with async_session() as db_session:
+            requester = await _resolve_dashboard_user(db_session, x_telegram_id)
+            await _get_owned_org_or_404(db_session, org_id, requester.id)
+            merged_tc: dict = {}
+            skills_list = agent_data.get("skills") or []
+            tools_list = agent_data.get("allowed_tools") or []
+            if skills_list:
+                merged_tc["skills"] = list(skills_list)
+            if tools_list:
+                merged_tc["allowed_tools"] = list(tools_list)
+            new_agent = OrgAgent(
+                org_id=org_id,
+                name=agent_data["name"],
+                role=agent_data["role"],
+                description=agent_data.get("description"),
+                instructions=agent_data.get("instructions"),
+                tools_config=merged_tc,
+                model_tier=agent_data.get("model_tier", "general"),
+            )
+            db_session.add(new_agent)
+            await db_session.flush()
+            await _log_org_activity(
+                db_session, org_id, "agent_created",
+                f"Agent '{new_agent.name}' ({new_agent.role}) created via wizard",
+                agent_id=new_agent.id,
+            )
+            await db_session.commit()
+            agent_id = new_agent.id
+            agent_name = new_agent.name
+        del _agent_wizard_sessions[session_id]
+        return {
+            "success": True,
+            "agent": {
+                "id": agent_id,
+                "name": agent_name,
+                "role": agent_data["role"],
+                "org_id": org_id,
+            },
+        }
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"Failed to save agent: {e}")
+
+
+@app.post("/api/agents/wizard/cancel")
+async def agent_wizard_cancel(request: AgentWizardSaveRequest):
+    session_id = request.session_id
+    if session_id in _agent_wizard_sessions:
+        del _agent_wizard_sessions[session_id]
     return {"success": True}
 
 

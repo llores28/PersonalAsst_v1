@@ -124,11 +124,29 @@ function Dashboard() {
 
   useEffect(() => {
 
+    // Bootstrap auth: /api/config is public; it returns the owner's telegram
+    // ID and the dashboard API key. We set BOTH as axios defaults so every
+    // subsequent request carries the headers the auth middleware expects.
+    // Without this, every ownership-scoped endpoint silently 401s and tabs
+    // (Jobs/Repairs/Costs/etc.) display as empty.
     axios.get(`${API}/config`).then(r => {
       const tid = r.data.owner_telegram_id;
+      const apiKey = r.data.dashboard_api_key;
       setOwnerTelegramId(tid);
-      if (tid) axios.defaults.headers.common['X-Telegram-Id'] = tid;
-    }).catch(() => {});
+      if (tid) {
+        axios.defaults.headers.common['X-Telegram-Id'] = String(tid);
+      }
+      // apiKey is empty string in dev mode (no key configured) — middleware
+      // allows empty, so we only set the header when there's a real value.
+      if (apiKey) {
+        axios.defaults.headers.common['X-API-Key'] = apiKey;
+      }
+    }).catch((err) => {
+      // /api/config is public; if this fails, the backend is unreachable.
+      // Surface it so the user sees something, instead of silently rendering
+      // empty tabs.
+      console.error('Failed to bootstrap dashboard config:', err);
+    });
 
   }, []);
 
@@ -158,9 +176,12 @@ function Dashboard() {
 
         axios.get(`${API}/budget`),
 
-        axios.get(`${API}/background-jobs`).catch(() => ({ data: [] })),
+        // Tolerate empty results but surface real errors (auth/network)
+        // by letting them propagate to the outer try/catch instead of
+        // silently swallowing them with `() => ({data:[]})` like before.
+        axios.get(`${API}/background-jobs`),
 
-        axios.get(`${API}/repairs`).catch(() => ({ data: [] })),
+        axios.get(`${API}/repairs`),
 
       ]);
 
@@ -4822,6 +4843,294 @@ function ToolWizardDialog({ open, onClose, onComplete }) {
 }
 
 
+// -- Agent Wizard Dialog ---------------------------------------------
+
+const AGENT_WIZARD_STEPS = ['Describe', 'Interview', 'Review', 'Done'];
+
+function AgentWizardDialog({ open, onClose, onComplete, orgId }) {
+  const [step, setStep] = useState(0);
+  const [description, setDescription] = useState('');
+  const [sessionId, setSessionId] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [answers, setAnswers] = useState([]);
+  const [message, setMessage] = useState('');
+  const [preview, setPreview] = useState(null);
+  // Editable copy of preview fields — user can tweak in the Review step.
+  const [edits, setEdits] = useState({});
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const reset = () => {
+    setStep(0);
+    setDescription('');
+    setSessionId(null);
+    setQuestions([]);
+    setAnswers([]);
+    setMessage('');
+    setPreview(null);
+    setEdits({});
+    setLoading(false);
+    setError(null);
+  };
+
+  const handleClose = () => {
+    if (sessionId) {
+      axios.post(`${API}/agents/wizard/cancel`, { session_id: sessionId }).catch(() => {});
+    }
+    reset();
+    onClose();
+  };
+
+  const handleStart = async () => {
+    if (!orgId) {
+      setError('No organization selected. Open the Agents tab from within an org first.');
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await axios.post(`${API}/agents/wizard/start`, { org_id: orgId, description });
+      setSessionId(r.data.session_id);
+      if (r.data.questions?.length > 0) {
+        setQuestions(r.data.questions);
+        setAnswers(new Array(r.data.questions.length).fill(''));
+      } else {
+        setMessage(r.data.message || '');
+      }
+      setStep(1);
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Failed to start wizard');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmitAnswers = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const combinedAnswer = questions.map((q, i) => `Q: ${q}\nA: ${answers[i] || ''}`).join('\n\n');
+      const r = await axios.post(`${API}/agents/wizard/answer`, { session_id: sessionId, answer: combinedAnswer });
+      if (r.data.step === 'review' && r.data.agent_preview) {
+        setPreview(r.data.agent_preview);
+        // Initialize edits from preview so the Review step is editable
+        setEdits({
+          name: r.data.agent_preview.name || '',
+          role: r.data.agent_preview.role || '',
+          description: r.data.agent_preview.description || '',
+          instructions: r.data.agent_preview.instructions || '',
+          skills: (r.data.agent_preview.skills || []).join(', '),
+          allowed_tools: (r.data.agent_preview.allowed_tools || []).join(', '),
+          model_tier: r.data.agent_preview.model_tier || 'general',
+        });
+        setStep(2);
+      } else if (r.data.questions?.length > 0) {
+        setQuestions(r.data.questions);
+        setAnswers(new Array(r.data.questions.length).fill(''));
+        setMessage('');
+      } else {
+        setMessage(r.data.message || '');
+      }
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Failed to process answers');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSave = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // Convert comma-separated skill / tool strings back to lists for the API.
+      const overrides = {
+        name: edits.name?.trim(),
+        role: edits.role?.trim(),
+        description: edits.description?.trim() || null,
+        instructions: edits.instructions?.trim() || null,
+        skills: edits.skills
+          ? edits.skills.split(',').map(s => s.trim()).filter(Boolean)
+          : [],
+        allowed_tools: edits.allowed_tools
+          ? edits.allowed_tools.split(',').map(s => s.trim()).filter(Boolean)
+          : [],
+        model_tier: edits.model_tier || 'general',
+      };
+      const r = await axios.post(`${API}/agents/wizard/save`, {
+        session_id: sessionId,
+        overrides,
+      });
+      setMessage(r.data?.agent?.name
+        ? `Agent "${r.data.agent.name}" created.`
+        : 'Agent saved.');
+      setStep(3);
+      setTimeout(() => { reset(); onComplete(); }, 1800);
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Failed to save agent');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateEdit = (key) => (e) => setEdits(prev => ({ ...prev, [key]: e.target.value }));
+
+  return (
+    <Dialog open={open} onClose={handleClose} maxWidth="md" fullWidth PaperProps={{ sx: { minHeight: 520 } }}>
+      <DialogTitle sx={{ pb: 0 }}>
+        <Box display="flex" alignItems="center" gap={1}>
+          <AutoAwesome color="secondary" />
+          <Typography variant="h6" fontWeight={700}>AI Agent Creation Wizard</Typography>
+        </Box>
+        <Typography variant="caption" color="text.secondary">
+          Describe the role you want filled — Atlas interviews you and drafts an agent. You can edit before saving.
+        </Typography>
+      </DialogTitle>
+
+      <DialogContent sx={{ pt: 1 }}>
+        {step < 3 && (
+          <Stepper activeStep={step} sx={{ mb: 3 }}>
+            {AGENT_WIZARD_STEPS.map(label => (
+              <Step key={label}><StepLabel>{label}</StepLabel></Step>
+            ))}
+          </Stepper>
+        )}
+
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+        {loading && <LinearProgress sx={{ mb: 2 }} />}
+
+        {/* Step 0: Describe */}
+        {step === 0 && (
+          <Box>
+            <Typography variant="body2" color="text.secondary" mb={2}>
+              Describe the role this agent should fill. Atlas will ask follow-ups about
+              responsibilities, skills, tools, and model tier.
+            </Typography>
+            <TextField
+              fullWidth multiline rows={4} autoFocus
+              label="What should this agent do?"
+              value={description}
+              onChange={e => setDescription(e.target.value)}
+              placeholder="e.g. Triage incoming Gmail every morning — label, draft replies for the top 3, snooze the rest."
+              helperText="Be concrete: what tasks, what tools, how often."
+            />
+          </Box>
+        )}
+
+        {/* Step 1: Interview */}
+        {step === 1 && (
+          <Box>
+            <Typography variant="subtitle2" fontWeight={700} mb={1}>
+              Atlas has a few questions before drafting the agent:
+            </Typography>
+            {message && !questions.length && (
+              <Typography variant="body2" color="text.secondary" mb={2} sx={{ whiteSpace: 'pre-wrap' }}>{message}</Typography>
+            )}
+            {questions.map((q, i) => (
+              <Box key={i} mb={2}>
+                <Typography variant="body2" fontWeight={500} mb={0.5}>{i + 1}. {q}</Typography>
+                <TextField
+                  fullWidth multiline rows={2} size="small"
+                  placeholder="Your answer..."
+                  value={answers[i] || ''}
+                  onChange={e => setAnswers(prev => { const a = [...prev]; a[i] = e.target.value; return a; })}
+                />
+              </Box>
+            ))}
+          </Box>
+        )}
+
+        {/* Step 2: Review & edit */}
+        {step === 2 && preview && (
+          <Box>
+            <Alert severity="success" sx={{ mb: 2 }}>
+              Draft generated. Review and tweak any field before saving — the AI's first guess is rarely the final form.
+            </Alert>
+
+            <Box display="flex" flexWrap="wrap" gap={1} mb={2}>
+              <Chip label={`Model tier: ${edits.model_tier}`} size="small" color={edits.model_tier === 'reasoning' ? 'warning' : 'default'} />
+              <Chip label={`Skills: ${(edits.skills?.split(',').filter(s => s.trim()).length) || 0}`} size="small" variant="outlined" />
+              <Chip label={`Tools: ${(edits.allowed_tools?.split(',').filter(s => s.trim()).length) || 0}`} size="small" variant="outlined" />
+            </Box>
+
+            <TextField fullWidth size="small" margin="dense" label="Name (snake_case)"
+              value={edits.name || ''} onChange={updateEdit('name')}
+              helperText="Internal identifier; lowercase, no spaces." />
+
+            <TextField fullWidth size="small" margin="dense" label="Role"
+              value={edits.role || ''} onChange={updateEdit('role')}
+              helperText="Concise role title (e.g., 'inbox triage specialist')." />
+
+            <TextField fullWidth size="small" margin="dense" label="Description"
+              value={edits.description || ''} onChange={updateEdit('description')}
+              multiline rows={2} />
+
+            <TextField fullWidth size="small" margin="dense" label="Instructions (system prompt)"
+              value={edits.instructions || ''} onChange={updateEdit('instructions')}
+              multiline rows={5}
+              helperText="Goes into the runtime system prompt; keep it actionable." />
+
+            <TextField fullWidth size="small" margin="dense" label="Skills (comma-separated)"
+              value={edits.skills || ''} onChange={updateEdit('skills')}
+              helperText="Skill identifiers this agent can invoke." />
+
+            <TextField fullWidth size="small" margin="dense" label="Allowed tools (comma-separated)"
+              value={edits.allowed_tools || ''} onChange={updateEdit('allowed_tools')}
+              helperText="Tool identifiers this agent has access to." />
+
+            <TextField fullWidth size="small" margin="dense" label="Model tier"
+              value={edits.model_tier || 'general'} onChange={updateEdit('model_tier')}
+              select SelectProps={{ native: true }}
+              helperText="fast = mini-class, general = full-size, reasoning = o1-class">
+              <option value="fast">fast</option>
+              <option value="general">general</option>
+              <option value="reasoning">reasoning</option>
+            </TextField>
+          </Box>
+        )}
+
+        {/* Step 3: Done */}
+        {step === 3 && (
+          <Box display="flex" flexDirection="column" alignItems="center" py={4}>
+            <AutoAwesome sx={{ fontSize: 64, color: 'success.main', mb: 2 }} />
+            <Typography variant="h6" color="success.main">Agent saved!</Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'pre-wrap', textAlign: 'center', mt: 1 }}>
+              {message || 'Your agent is now registered with this organization.'}
+            </Typography>
+          </Box>
+        )}
+      </DialogContent>
+
+      <DialogActions sx={{ px: 3, pb: 2 }}>
+        {step < 3 ? (
+          <Button onClick={handleClose} disabled={loading}>Cancel</Button>
+        ) : (
+          <Button onClick={handleClose}>Close</Button>
+        )}
+        <Box flex={1} />
+        {step === 0 && (
+          <Button variant="contained" color="secondary" startIcon={<AutoAwesome />}
+            onClick={handleStart} disabled={!description.trim() || loading}>
+            Start Interview
+          </Button>
+        )}
+        {step === 1 && (
+          <Button variant="contained" onClick={handleSubmitAnswers}
+            disabled={loading || answers.every(a => !a?.trim())}>
+            {loading ? 'Drafting...' : 'Submit Answers'}
+          </Button>
+        )}
+        {step === 2 && (
+          <Button variant="contained" color="success" onClick={handleSave}
+            disabled={loading || !edits.name?.trim() || !edits.role?.trim()}>
+            {loading ? 'Saving...' : 'Save Agent'}
+          </Button>
+        )}
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+
 // -- Scheduler Diagnostics Tab ---------------------------------------
 
 
@@ -5198,6 +5507,16 @@ function AgentsTab({ orgs, fetchAll }) {
 
   const [deleteLoading, setDeleteLoading] = useState(false);
 
+  // AI Wizard state — clones the Tools/Skills wizard pattern.
+  // wizardOrgId is the org the new agent will belong to. We default to the
+  // first non-archived org when the user opens the wizard, but they can
+  // switch via the dropdown inside the wizard launcher button.
+  const [wizardOpen, setWizardOpen] = useState(false);
+
+  const [wizardOrgId, setWizardOrgId] = useState(null);
+
+  const eligibleOrgs = (orgs || []).filter(o => o.status !== 'archived');
+
 
 
   const fetchAgents = async () => {
@@ -5238,6 +5557,9 @@ function AgentsTab({ orgs, fetchAll }) {
 
   const handleEdit = (agent) => { setSelectedAgent(agent); setEditDialogOpen(true); };
 
+  // Two-phase delete: open the preview dialog first; the dialog itself
+  // fetches the impact preview and only confirms when the user types the
+  // agent name and clicks Delete.
   const handleDeleteClick = (agent) => { setAgentToDelete(agent); setDeleteDialogOpen(true); };
 
 
@@ -5280,13 +5602,56 @@ function AgentsTab({ orgs, fetchAll }) {
 
       <Paper sx={{ p: 2, mb: 2 }}>
 
-        <ToggleButtonGroup value={activeSection} exclusive onChange={(_, v) => v && setActiveSection(v)} fullWidth>
+        <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
 
-          <ToggleButton value="org">My Agents ({orgAgents.length})</ToggleButton>
+          <ToggleButtonGroup value={activeSection} exclusive onChange={(_, v) => v && setActiveSection(v)} sx={{ flex: 1, minWidth: 280 }}>
 
-          <ToggleButton value="system">System Agents ({systemAgents.length})</ToggleButton>
+            <ToggleButton value="org">My Agents ({orgAgents.length})</ToggleButton>
 
-        </ToggleButtonGroup>
+            <ToggleButton value="system">System Agents ({systemAgents.length})</ToggleButton>
+
+          </ToggleButtonGroup>
+
+          {activeSection === 'org' && (
+
+            <Button
+
+              variant="contained"
+
+              color="secondary"
+
+              startIcon={<AutoAwesome />}
+
+              disabled={eligibleOrgs.length === 0}
+
+              onClick={() => {
+
+                // Default to first eligible org; user changes via the dropdown if needed
+                setWizardOrgId(prev => prev || eligibleOrgs[0]?.id || null);
+
+                setWizardOpen(true);
+
+              }}
+
+            >
+
+              AI Wizard
+
+            </Button>
+
+          )}
+
+        </Box>
+
+        {activeSection === 'org' && eligibleOrgs.length === 0 && (
+
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+
+            Create an organization first — agents are scoped to an org.
+
+          </Typography>
+
+        )}
 
       </Paper>
 
@@ -5358,41 +5723,285 @@ function AgentsTab({ orgs, fetchAll }) {
 
 
 
-      <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)} maxWidth="sm">
+      <AgentDeletePreviewDialog
 
-        <DialogTitle>Delete Agent</DialogTitle>
+        open={deleteDialogOpen}
 
-        <DialogContent>
+        agent={agentToDelete}
 
-          <Typography>Are you sure you want to delete <strong>{agentToDelete?.name}</strong>?</Typography>
+        onClose={() => { setDeleteDialogOpen(false); setAgentToDelete(null); }}
 
-          {agentToDelete?.org_status === 'active' && (
+        onDeleted={() => { setDeleteDialogOpen(false); setAgentToDelete(null); fetchAgents(); fetchAll(); }}
 
-            <Alert severity="warning" sx={{ mt: 2 }}>
+      />
 
-              This agent is attached to an active organization. Pause or archive the org first.
+      {/* Pick which org the new agent goes into when more than one exists */}
+      {wizardOpen && eligibleOrgs.length > 1 && (
 
-            </Alert>
+        <Dialog open={!wizardOrgId} onClose={() => setWizardOpen(false)} maxWidth="xs" fullWidth>
 
-          )}
+          <DialogTitle>Pick organization</DialogTitle>
 
-        </DialogContent>
+          <DialogContent>
 
-        <DialogActions>
+            <Typography variant="body2" color="text.secondary" mb={2}>
 
-          <Button onClick={() => setDeleteDialogOpen(false)}>Cancel</Button>
+              Which organization should the new agent belong to?
 
-          <Button onClick={handleDeleteConfirm} color="error" disabled={deleteLoading || agentToDelete?.org_status === 'active'}>
+            </Typography>
 
-            {deleteLoading ? 'Deleting...' : 'Delete'}
+            <List dense>
 
-          </Button>
+              {eligibleOrgs.map(o => (
 
-        </DialogActions>
+                <ListItem key={o.id} button onClick={() => setWizardOrgId(o.id)}>
 
-      </Dialog>
+                  <ListItemText primary={o.name} secondary={`status: ${o.status}`} />
+
+                </ListItem>
+
+              ))}
+
+            </List>
+
+          </DialogContent>
+
+          <DialogActions>
+
+            <Button onClick={() => setWizardOpen(false)}>Cancel</Button>
+
+          </DialogActions>
+
+        </Dialog>
+
+      )}
+
+      <AgentWizardDialog
+
+        open={wizardOpen && !!wizardOrgId}
+
+        orgId={wizardOrgId}
+
+        onClose={() => { setWizardOpen(false); setWizardOrgId(null); }}
+
+        onComplete={() => { setWizardOpen(false); setWizardOrgId(null); fetchAgents(); fetchAll(); }}
+
+      />
 
     </Box>
+
+  );
+
+}
+
+
+
+// Two-phase agent delete: fetches the impact preview from the backend,
+// shows tasks/activity that will be affected, requires the user to type
+// the agent name to confirm. Mirrors the org-delete-preview pattern.
+function AgentDeletePreviewDialog({ open, agent, onClose, onDeleted }) {
+
+  const [preview, setPreview] = useState(null);
+
+  const [loading, setLoading] = useState(false);
+
+  const [confirmText, setConfirmText] = useState('');
+
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+
+    if (!open || !agent) {
+
+      setPreview(null);
+
+      setConfirmText('');
+
+      setError(null);
+
+      return;
+
+    }
+
+    setLoading(true);
+
+    setError(null);
+
+    axios.get(`${API}/orgs/${agent.org_id}/agents/${agent.id}/delete-preview`)
+
+      .then(r => setPreview(r.data))
+
+      .catch(e => setError(e.response?.data?.detail || 'Failed to load delete preview'))
+
+      .finally(() => setLoading(false));
+
+  }, [open, agent?.id, agent?.org_id]);
+
+  const handleDelete = async () => {
+
+    if (!agent) return;
+
+    setLoading(true);
+
+    setError(null);
+
+    try {
+
+      await axios.delete(`${API}/orgs/${agent.org_id}/agents/${agent.id}`);
+
+      onDeleted();
+
+    } catch (e) {
+
+      setError(e.response?.data?.detail || 'Failed to delete agent');
+
+    } finally {
+
+      setLoading(false);
+
+    }
+
+  };
+
+  const nameMatches = preview && confirmText.trim() === preview.agent.name;
+
+  const blocked = preview?.deletion_blocked;
+
+  return (
+
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+
+      <DialogTitle>Delete agent</DialogTitle>
+
+      <DialogContent>
+
+        {loading && !preview && <LinearProgress sx={{ mb: 2 }} />}
+
+        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
+
+        {preview && (
+
+          <Box>
+
+            <Typography mb={1}>
+
+              You're about to delete <strong>{preview.agent.name}</strong> ({preview.agent.role}).
+
+            </Typography>
+
+            {blocked && (
+
+              <Alert severity="warning" sx={{ mb: 2 }}>
+
+                This agent is attached to an <strong>active</strong> organization. Pause or archive the org first; the delete is blocked until then.
+
+              </Alert>
+
+            )}
+
+            <Box mb={2}>
+
+              <Typography variant="caption" color="text.secondary">Impact</Typography>
+
+              <List dense>
+
+                <ListItem sx={{ py: 0 }}>
+
+                  <ListItemText
+
+                    primary={`${preview.active_tasks_count} active task(s) — orphaned (FK SET NULL, not lost)`}
+
+                    secondary={preview.active_tasks_count > 0
+
+                      ? preview.active_tasks.slice(0, 5).map(t => `#${t.id} ${t.title}`).join(' · ')
+
+                      : 'none'}
+
+                    primaryTypographyProps={{ variant: 'body2' }}
+
+                    secondaryTypographyProps={{ variant: 'caption' }}
+
+                  />
+
+                </ListItem>
+
+                <ListItem sx={{ py: 0 }}>
+
+                  <ListItemText
+
+                    primary={`${preview.completed_tasks_count} completed task(s) — preserved (audit trail)`}
+
+                    primaryTypographyProps={{ variant: 'body2' }}
+
+                  />
+
+                </ListItem>
+
+                <ListItem sx={{ py: 0 }}>
+
+                  <ListItemText
+
+                    primary={`${preview.activity_count} activity log entr${preview.activity_count === 1 ? 'y' : 'ies'} — preserved`}
+
+                    primaryTypographyProps={{ variant: 'body2' }}
+
+                  />
+
+                </ListItem>
+
+              </List>
+
+            </Box>
+
+            <Typography variant="body2" color="text.secondary" mb={1}>
+
+              To confirm, type the agent name <code>{preview.agent.name}</code> below:
+
+            </Typography>
+
+            <TextField
+
+              fullWidth size="small" autoFocus
+
+              value={confirmText}
+
+              onChange={e => setConfirmText(e.target.value)}
+
+              placeholder={preview.agent.name}
+
+              disabled={blocked}
+
+            />
+
+          </Box>
+
+        )}
+
+      </DialogContent>
+
+      <DialogActions>
+
+        <Button onClick={onClose}>Cancel</Button>
+
+        <Button
+
+          onClick={handleDelete}
+
+          color="error"
+
+          variant="contained"
+
+          disabled={loading || blocked || !nameMatches}
+
+        >
+
+          {loading ? 'Deleting...' : 'Delete agent'}
+
+        </Button>
+
+      </DialogActions>
+
+    </Dialog>
 
   );
 
