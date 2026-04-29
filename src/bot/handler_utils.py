@@ -1,6 +1,7 @@
 import logging
 import re
 import base64
+from contextlib import asynccontextmanager
 from typing import Any
 from urllib.parse import urlparse
 
@@ -178,22 +179,109 @@ def _clean_image_caption(raw: str, prompt: str) -> str:
 
 
 async def _send_typing(message: Any) -> None:
-    """Send a single typing action, suppressing any errors."""
+    """Send a single typing action, suppressing any errors.
+
+    Prefer ``_typing_action`` (context manager) for any code path that wraps
+    a long-running operation — Telegram clears the typing indicator after
+    ~5s, so a one-shot ``sendChatAction`` disappears mid-orchestration.
+    """
     try:
         await message.answer_chat_action(action="typing")
     except Exception:
         pass
 
 
+@asynccontextmanager
+async def _typing_action(message: Any, action: str = "typing", *, interval: float = 4.5):
+    """Keep a Telegram chat action ('typing', 'upload_photo', 'record_voice',
+    etc.) visible for the entire ``async with`` body, even if the inner work
+    runs longer than Telegram's 5-second action TTL.
+
+    Backed by ``aiogram.utils.chat_action.ChatActionSender``, which spawns a
+    background task that re-sends the action on a loop and stops when the
+    context exits. Documented at
+    https://docs.aiogram.dev/en/latest/utils/chat_action.html.
+
+    Args:
+        message: aiogram ``Message`` (must expose ``bot`` and ``chat.id``).
+        action: Telegram chat action — ``typing``, ``upload_photo``,
+            ``record_voice``, ``upload_voice``, ``upload_document``, etc.
+        interval: Seconds between re-sends. Slightly under Telegram's 5s TTL
+            so the dot never blinks. Lower values for tests; never raise
+            above 5.0 in production.
+
+    Failure-tolerant: if the sender can't be set up (network blip, missing
+    bot reference on a synthetic message), the body still runs — typing
+    indicator failures must never block the user's request.
+    """
+    sender = None
+    started = False
+    try:
+        from aiogram.utils.chat_action import ChatActionSender
+
+        sender = ChatActionSender(
+            bot=message.bot,
+            chat_id=message.chat.id,
+            action=action,
+            interval=interval,
+        )
+        await sender.__aenter__()
+        started = True
+    except Exception as exc:  # noqa: BLE001 — swallow on purpose; see docstring
+        logger.debug("ChatActionSender setup failed (%s): falling back to one-shot", exc)
+        try:
+            await message.answer_chat_action(action=action)
+        except Exception:
+            pass
+
+    try:
+        yield
+    finally:
+        if started and sender is not None:
+            try:
+                await sender.__aexit__(None, None, None)
+            except Exception:
+                pass
+
+
 def _strip_markdown(text: str) -> str:
-    """Strip common Markdown syntax for cleaner TTS output."""
+    """Clean text for TTS playback.
+
+    A naive TTS engine reading our standard reply format will pronounce
+    every ``*``, ``#``, ``<br/>``, raw URL, and "Meeting ID: 811 8943 7956"
+    literally — turning a 30-second answer into a 3-minute drone. This
+    helper strips:
+
+    - Markdown emphasis, code, headings, bullets, links
+    - HTML tags + entities (Zoom/Meet/Teams invites embed lots of these)
+    - Raw URLs (``location: https://...`` becomes silent — voice users
+      can't click anyway)
+    - Long alphanumeric tokens that look like meeting IDs / message IDs
+    - Repeated whitespace + leading/trailing junk
+    """
+    # Markdown
     text = re.sub(r"\*{1,3}(.+?)\*{1,3}", r"\1", text)
     text = re.sub(r"_{1,3}(.+?)_{1,3}", r"\1", text)
     text = re.sub(r"`{1,3}[^`]*`{1,3}", "", text)
     text = re.sub(r"#+\s*", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"^\s*[-*>]\s+", "", text, flags=re.MULTILINE)
-    return text.strip()
+    # HTML — block tags become a sentence break, inline tags vanish.
+    text = re.sub(r"<\s*(?:br|p|div|li|tr|h[1-6])\b[^>]*>", ". ", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"&(?:nbsp|amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);", " ", text)
+    # Bare URLs / common conferencing noise
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(
+        r"(?:meeting\s+id|passcode|join\s+by\s+sip|one\s+tap\s+mobile|join\s+instructions)\s*:\s*\S[^\n.]*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    # Collapse whitespace + duplicate-period runs left over from above
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(?:\.\s*){2,}", ". ", text)
+    return text.strip(" .,;:-")
 
 
 async def _maybe_send_tts_reply(message: Any, text: str) -> None:
@@ -236,35 +324,44 @@ async def _run_orchestrator_with_text(message: Any, text: str) -> None:
         MaxTurnsExceeded,
     )
 
-    await _send_typing(message)
-
+    # Wrap the orchestrator + reply in a ChatActionSender so the Telegram
+    # "typing..." dot stays visible the whole time. A bare one-shot
+    # ``send_chat_action`` clears after ~5s — orchestrator turns routinely
+    # take 10-60s (memory load + LLM + MCP tool calls), and the user sees
+    # nothing during that window without periodic re-sends.
     try:
-        result = await run_orchestrator_result(
-            user_telegram_id=message.from_user.id,
-            user_message=text,
-        )
-        if result.images:
-            for index, image in enumerate(result.images, start=1):
-                try:
-                    await message.answer_chat_action(action="upload_photo")
-                except Exception:
-                    pass
-                photo = BufferedInputFile(
-                    base64.b64decode(image.data_base64),
-                    filename=f"openrouter-image-{index}.png",
-                )
-                caption = _clean_image_caption(image.caption, image.prompt)
-                try:
-                    await message.answer_photo(photo=photo, caption=caption)
-                except Exception as exc:
-                    logger.warning("Failed to send generated image: %s", exc)
-            if result.text:
+        async with _typing_action(message, action="typing"):
+            result = await run_orchestrator_result(
+                user_telegram_id=message.from_user.id,
+                user_message=text,
+            )
+            if result.images:
+                for index, image in enumerate(result.images, start=1):
+                    # Briefly switch the action for the upload itself —
+                    # Telegram clients show 📷 instead of …
+                    try:
+                        await message.answer_chat_action(action="upload_photo")
+                    except Exception:
+                        pass
+                    photo = BufferedInputFile(
+                        base64.b64decode(image.data_base64),
+                        filename=f"openrouter-image-{index}.png",
+                    )
+                    caption = _clean_image_caption(image.caption, image.prompt)
+                    try:
+                        await message.answer_photo(photo=photo, caption=caption)
+                    except Exception as exc:
+                        logger.warning("Failed to send generated image: %s", exc)
+                if result.text:
+                    await _answer_with_markdown_fallback(message, result.text)
+            else:
                 await _answer_with_markdown_fallback(message, result.text)
-        else:
-            await _answer_with_markdown_fallback(message, result.text)
 
-        # TTS: send voice reply if user requested audio
-        await _maybe_send_tts_reply(message, result.text)
+            # TTS: send voice reply if user requested audio. Inside the
+            # typing context so the dot stays visible during synthesis;
+            # ``_maybe_send_tts_reply`` toggles to record_voice before the
+            # actual upload.
+            await _maybe_send_tts_reply(message, result.text)
     except InputGuardrailTripwireTriggered:
         await message.answer(
             "Sorry, my safety filter flagged that message. "
@@ -300,22 +397,25 @@ async def _run_orchestrator_with_text(message: Any, text: str) -> None:
                 sdk_session = await _get_agent_session(message.from_user.id)
                 if sdk_session is not None:
                     await sdk_session.clear()
-                result = await run_orchestrator_result(
-                    user_telegram_id=message.from_user.id,
-                    user_message=text,
-                )
-                if result.images:
-                    for index, image in enumerate(result.images, start=1):
-                        photo = BufferedInputFile(
-                            base64.b64decode(image.data_base64),
-                            filename=f"openrouter-image-{index}.png",
-                        )
-                        caption = _clean_image_caption(image.caption, image.prompt)
-                        await message.answer_photo(photo=photo, caption=caption)
-                    if result.text:
+                # Keep the typing indicator alive for the retry too — it's
+                # another full orchestrator run.
+                async with _typing_action(message, action="typing"):
+                    result = await run_orchestrator_result(
+                        user_telegram_id=message.from_user.id,
+                        user_message=text,
+                    )
+                    if result.images:
+                        for index, image in enumerate(result.images, start=1):
+                            photo = BufferedInputFile(
+                                base64.b64decode(image.data_base64),
+                                filename=f"openrouter-image-{index}.png",
+                            )
+                            caption = _clean_image_caption(image.caption, image.prompt)
+                            await message.answer_photo(photo=photo, caption=caption)
+                        if result.text:
+                            await _answer_with_markdown_fallback(message, result.text)
+                    else:
                         await _answer_with_markdown_fallback(message, result.text)
-                else:
-                    await _answer_with_markdown_fallback(message, result.text)
                 return
             except Exception as retry_exc:
                 logger.exception("Retry after session clear also failed: %s", retry_exc)

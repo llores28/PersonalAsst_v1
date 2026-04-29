@@ -394,6 +394,33 @@ async def build_dynamic_persona_prompt(
     )
 
 
+# Compiled once: matches "(last|latest|most recent|newest|recent|first) ...
+# (email|emails|gmail|inbox|message|mail)" with up to 5 connecting tokens
+# between (handles "last unread email", "latest message in my inbox",
+# "most recent email i got today", etc.) — broader fallback for the
+# explicit phrase list above.
+_RECENT_EMAIL_RE = re.compile(
+    r"\b(?:last|latest|most\s+recent|newest|recent|first|top|"
+    r"yesterday(?:'|‘|’|\s+'|\s+‘|\s+’)?s?|today(?:'|‘|’|\s+'|\s+‘|\s+’)?s?)\b"
+    r"(?:[\w'’\s-]{0,40}?)"
+    r"\b(?:email|emails|gmail|inbox|message|messages|mail|e-?mails?)\b",
+    re.IGNORECASE,
+)
+
+# Catches "what was my email" / "any new email" / "got an email today" — the
+# bare-noun forms where there's no "last/latest" qualifier but the request is
+# still clearly an inbox check.
+_EMAIL_TODAY_RE = re.compile(
+    r"\b(?:what(?:'|‘|’)?s?(?:\s+was)?|what\s+is|any|do\s+i\s+have|got|received|"
+    r"have\s+i\s+(?:got|gotten|received))\b"
+    r"(?:[\w'’\s-]{0,40}?)"
+    r"\b(?:email|emails|gmail|inbox|message|messages|mail|e-?mails?)\b"
+    r"(?:[\w'’\s-]{0,40}?)"
+    r"\b(?:today|recently|lately|this\s+(?:morning|afternoon|evening|week))?\b",
+    re.IGNORECASE,
+)
+
+
 def _is_simple_connected_gmail_check(user_message: str) -> bool:
     lowered = user_message.strip().lower()
     gmail_verbs = (
@@ -421,7 +448,28 @@ def _is_simple_connected_gmail_check(user_message: str) -> bool:
         "what's in my inbox",
         "whats in my inbox",
     )
-    return any(phrase in lowered for phrase in gmail_verbs)
+    if any(phrase in lowered for phrase in gmail_verbs):
+        return True
+
+    # Regex fallback: "last/latest/most recent ... email/gmail/inbox/mail"
+    if _RECENT_EMAIL_RE.search(lowered):
+        return True
+
+    # Regex fallback: "what was my email today" / "any new mail" / "got an email today"
+    if _EMAIL_TODAY_RE.search(lowered):
+        # Require that the message reads as a question or look-up, not a
+        # statement about emails ("I sent an email earlier" should not match).
+        # A simple heuristic: contains a question mark, starts with a wh-/aux
+        # word, or includes a recency qualifier like "today" / "recently".
+        starters = ("what", "any", "do i", "got", "received", "have i", "is there", "are there")
+        if (
+            "?" in lowered
+            or lowered.startswith(starters)
+            or any(t in lowered for t in (" today", " recently", " lately", "this morning", "this afternoon", "this evening"))
+        ):
+            return True
+
+    return False
 
 
 def _gmail_search_query_for_message(user_message: str) -> str:
@@ -685,11 +733,25 @@ def _build_email_summary(subject: str, sender: str, body: str) -> tuple[str, str
     return reason, " ".join(summary_sentences[:2])
 
 
-def _format_connected_gmail_summary(search_results: str, batch_results: str) -> str:
+def _format_connected_gmail_summary(search_results: str, batch_results: str, *, voice_mode: bool = False) -> str:
     found_count = _extract_gmail_found_count(search_results)
     messages = _parse_gmail_batch_messages(batch_results)
     if not messages:
         return search_results
+
+    if voice_mode:
+        # Spoken summary: who and what, no numbered list, no detail bullets.
+        # 5-msg cap matches the calendar voice format.
+        head = f"You have {len(messages)} email{'s' if len(messages) != 1 else ''}: "
+        spoken = []
+        for message in messages[:5]:
+            sender = _sender_display_name(message.get("from", "") or "Unknown sender")
+            subject = (message.get("subject", "") or "no subject").strip()
+            spoken.append(f"{sender} — {subject}")
+        tail = ""
+        if found_count is not None and found_count > len(messages):
+            tail = f" Plus {found_count - len(messages)} more."
+        return head + "; ".join(spoken) + "." + tail
 
     header = "Here are your latest emails:"
     if found_count is not None and found_count > len(messages):
@@ -751,6 +813,7 @@ async def _maybe_handle_connected_gmail_check(
         return None
 
     single_unread_request = _is_latest_unread_email_request(user_message)
+    voice_mode = await _user_wants_voice_reply(user_telegram_id)
 
     try:
         search_results = await call_workspace_tool(
@@ -811,7 +874,7 @@ async def _maybe_handle_connected_gmail_check(
             "I found your latest emails, but I couldn't summarize them cleanly right now. "
             f"Google returned: {exc}.\n\n{search_results}"
         )
-    return _format_connected_gmail_summary(search_results, batch_results)
+    return _format_connected_gmail_summary(search_results, batch_results, voice_mode=voice_mode)
 
 
 def _is_simple_connected_calendar_check(user_message: str) -> bool:
@@ -893,6 +956,52 @@ def _format_calendar_time_range(start_value: str, end_value: str) -> str:
     return f"{start.strftime('%I:%M %p').lstrip('0')} - {end.strftime('%I:%M %p').lstrip('0')}"
 
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_ENTITY_RE = re.compile(r"&(?:nbsp|amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);")
+_URL_RE = re.compile(r"https?://\S+")
+_ZOOM_NOISE_RE = re.compile(
+    r"(?:meeting\s+id\s*:\s*[\d\s]+|passcode\s*:\s*\S+|join\s+by\s+sip|"
+    r"one\s+tap\s+mobile|join\s+instructions|join\s+zoom\s+meeting|"
+    r"is\s+inviting\s+you\s+to\s+a\s+scheduled\s+zoom\s+meeting)",
+    re.IGNORECASE,
+)
+_WHITESPACE_RUN_RE = re.compile(r"\s+")
+
+
+def _clean_event_description(description: str, *, voice_mode: bool = False, max_chars: int = 160) -> str:
+    """Strip HTML, collapse whitespace, drop noise from a Google Calendar
+    event description so it's safe for both text + TTS.
+
+    Real-world descriptions from auto-generated invites (Zoom, Google Meet,
+    Teams) embed HTML, base64 join URLs, dial-in numbers, and meeting IDs.
+    Showing them verbatim — and especially READING THEM ALOUD as TTS — is
+    user-hostile. We:
+      1. strip ``<p>`` / ``<br/>`` / etc.
+      2. decode common HTML entities
+      3. drop URLs (the join link is almost always also in ``location``)
+      4. drop Zoom/Meet boilerplate (Meeting ID, passcode, dial-in)
+      5. collapse whitespace
+      6. truncate. Voice gets a hard ~80-char cap so the TTS doesn't drone.
+    """
+    if not description or description.strip().lower() == "no description":
+        return ""
+
+    text = _HTML_TAG_RE.sub(" ", description)
+    text = _HTML_ENTITY_RE.sub(" ", text)
+    text = _URL_RE.sub("", text)
+    text = _ZOOM_NOISE_RE.sub("", text)
+    text = _WHITESPACE_RUN_RE.sub(" ", text).strip()
+
+    if voice_mode and text:
+        max_chars = 80
+
+    if len(text) > max_chars:
+        # Cut on a sentence/word boundary if we can
+        cut = text[:max_chars].rsplit(" ", 1)[0]
+        text = cut.rstrip(",.;:- ") + "…"
+    return text
+
+
 def _parse_calendar_events(results: str) -> list[dict[str, str]]:
     events: list[dict[str, str]] = []
     current_event: dict[str, str] | None = None
@@ -936,13 +1045,41 @@ def _parse_calendar_events(results: str) -> list[dict[str, str]]:
     return events
 
 
-def _format_connected_calendar_summary(label: str, results: str) -> str:
+def _shorten_event_location(location: str, *, voice_mode: bool = False) -> str:
+    """Locations from Zoom/Meet invites are often raw join URLs. In text mode
+    we collapse them to "Zoom link"; in voice mode we drop them entirely
+    (the user can't click a URL while listening anyway)."""
+    if not location:
+        return ""
+    if _URL_RE.match(location):
+        if "zoom.us" in location.lower():
+            return "" if voice_mode else "Zoom link"
+        if "meet.google.com" in location.lower():
+            return "" if voice_mode else "Google Meet link"
+        if "teams.microsoft.com" in location.lower():
+            return "" if voice_mode else "Teams link"
+        return "" if voice_mode else "Online meeting link"
+    return location
+
+
+def _format_connected_calendar_summary(label: str, results: str, *, voice_mode: bool = False) -> str:
+    """Render a get_events response for the user.
+
+    ``voice_mode=True`` produces a short, conversational paragraph suitable
+    for TTS playback — no numbered lists, no URLs, no HTML, no noise. Voice
+    UX research suggests spoken replies should land in the 75–150 word range
+    (~30–60s of audio); the verbose numbered list we used to emit was 4–8x
+    longer and read out HTML / Zoom dial-in numbers literally.
+    """
     events = _parse_calendar_events(results)
     if not events:
         lowered = results.lower()
         if "0 events" in lowered or "no events" in lowered:
             return f"Your calendar is clear for {label}."
         return results
+
+    if voice_mode:
+        return _format_calendar_summary_for_voice(label, events)
 
     blocks: list[str] = []
     for index, event in enumerate(events, start=1):
@@ -952,12 +1089,52 @@ def _format_connected_calendar_summary(label: str, results: str) -> str:
             f"Time: {_format_calendar_time_range(event['start'], event['end'])}",
             f"Event: {event['title']}",
         ]
-        if event["location"]:
-            event_lines.append(f"Location: {event['location']}")
-        if event["description"]:
-            event_lines.append(f"Details: {event['description']}")
+        location = _shorten_event_location(event["location"])
+        if location:
+            event_lines.append(f"Location: {location}")
+        cleaned = _clean_event_description(event["description"])
+        if cleaned:
+            event_lines.append(f"Details: {cleaned}")
         blocks.append("\n".join(event_lines))
     return f"Here's your schedule for {label}:\n\n" + "\n\n".join(blocks)
+
+
+def _format_calendar_summary_for_voice(label: str, events: list[dict[str, str]]) -> str:
+    """Conversational, single-paragraph summary for TTS playback.
+
+    Format: "You have N event(s) for <label>: <title> on <weekday>
+    at <time>; <title> on <weekday> at <time>. (Plus M more.)"
+    """
+    count = len(events)
+    if count == 0:
+        return f"You're clear for {label}."
+
+    spoken_items: list[str] = []
+    # Cap at 5 — anything longer becomes a tedious recital. The user can ask
+    # for the full list if they want it written out.
+    visible = events[:5]
+    for event in visible:
+        try:
+            start_dt = datetime.fromisoformat(event["start"]).astimezone(ZoneInfo(settings.default_timezone))
+            weekday = start_dt.strftime("%A")
+            time_str = start_dt.strftime("%I:%M %p").lstrip("0").lower().replace(":00", "")
+            day_clause = f"on {weekday} at {time_str}"
+        except ValueError:
+            day_clause = ""
+
+        title = event["title"].strip().rstrip("'").rstrip("'") or "Untitled event"
+        if day_clause:
+            spoken_items.append(f"{title} {day_clause}")
+        else:
+            spoken_items.append(title)
+
+    head = f"You have {count} event{'s' if count != 1 else ''} for {label}: "
+    body = "; ".join(spoken_items) + "."
+    tail = ""
+    if count > len(visible):
+        extra = count - len(visible)
+        tail = f" Plus {extra} more — let me know if you want the full list."
+    return head + body + tail
 
 
 def _format_connected_gmail_write_error(action: str, connected_google_email: str, exc: Exception) -> str:
@@ -1237,6 +1414,23 @@ def _format_pending_gmail_draft_review(pending_send: dict[str, str | None]) -> s
     return "\n".join(lines)
 
 
+async def _user_wants_voice_reply(user_telegram_id: int) -> bool:
+    """Return True if the current turn was kicked off by a voice message
+    (the bot handler sets ``wants_audio_reply=true`` on the session before
+    enqueueing the orchestrator call).
+
+    Used by deterministic short-circuits to switch to a short, conversational
+    summary suitable for TTS playback instead of the verbose written form.
+    """
+    try:
+        from src.memory.conversation import get_session_field
+
+        flag = await get_session_field(user_telegram_id, "wants_audio_reply")
+        return flag == "true"
+    except Exception:  # noqa: BLE001 — never block a turn on this
+        return False
+
+
 async def _maybe_handle_connected_calendar_check(
     user_telegram_id: int,
     user_message: str,
@@ -1259,6 +1453,11 @@ async def _maybe_handle_connected_calendar_check(
 
     time_min, time_max, label = _calendar_time_range_for_message(effective_message)
 
+    # If the user just spoke (voice message → wants_audio_reply flag), the
+    # reply will also be synthesized as TTS — switch to a short, spoken-form
+    # summary instead of the verbose numbered list.
+    voice_mode = await _user_wants_voice_reply(user_telegram_id)
+
     try:
         results = await call_workspace_tool(
             "get_events",
@@ -1279,7 +1478,7 @@ async def _maybe_handle_connected_calendar_check(
             f"If this keeps happening, try `/connect google {connected_google_email}` again."
         )
 
-    return _format_connected_calendar_summary(label, results)
+    return _format_connected_calendar_summary(label, results, voice_mode=voice_mode)
 
 
 def _is_simple_connected_google_tasks_read(user_message: str) -> bool:
@@ -1940,20 +2139,40 @@ async def create_orchestrator_async(
             created_at=_time.time(),
         )
 
-    tools = [WebSearchTool()]
-
     # ── Selective skill injection (OpenClaw pattern) ──────────────────
     # Only inject tools/instructions for skills matching the user message.
     # Falls back to full set if no message or nothing matches.
     if user_message:
-        tools.extend(skill_registry.get_tools_selective(user_message, SkillProfile.FULL))
+        matched_skill_ids = skill_registry.match_skills(user_message)
+        skill_tools = skill_registry.get_tools_selective(user_message, SkillProfile.FULL)
         skill_instructions = skill_registry.get_instructions_selective(user_message, SkillProfile.FULL)
     else:
-        tools.extend(skill_registry.get_tools(SkillProfile.FULL))
+        matched_skill_ids = frozenset()
+        skill_tools = skill_registry.get_tools(SkillProfile.FULL)
         skill_instructions = skill_registry.get_instructions(SkillProfile.FULL)
+
+    # WebSearchTool is otherwise the lowest-friction option for the model and
+    # the LLM will reach for it on workspace queries ("what was my last email
+    # today?") — citing support.google.com instead of calling
+    # `search_connected_gmail_messages`. Drop it when workspace skills clearly
+    # match AND the workspace is operational; the user's data is private and
+    # web search has no path to it anyway.
+    workspace_match = bool(connected_google_email) and any(
+        sid in matched_skill_ids
+        for sid in ("gmail", "calendar", "drive", "google_tasks", "google_docs", "google_sheets", "google_slides", "google_contacts")
+    )
+    if workspace_match:
+        tools = list(skill_tools)
+        logger.info("WebSearchTool suppressed: workspace skill match for connected user")
+    else:
+        tools = [WebSearchTool(), *skill_tools]
+
     if skill_instructions:
         persona_prompt = f"{persona_prompt}\n\n{skill_instructions}"
-    logger.info("SkillRegistry: %d skills, %d tools injected (selective=%s)", len(skill_registry), len(tools), bool(user_message))
+    logger.info(
+        "SkillRegistry: %d skills, %d tools injected (selective=%s, websearch=%s)",
+        len(skill_registry), len(tools), bool(user_message), not workspace_match,
+    )
 
     # Phase 5: Tool Factory Agent (Handoff — only agent that gets handoff per AD-3)
     tool_factory_agent = create_tool_factory_agent()
@@ -2901,6 +3120,22 @@ async def _run_reflector_background(
 
         if score < 0.4:
             logger.warning("Low quality interaction for user %s (score: %.1f)", user_id, score)
+            # Wave 1.3: queue this turn for skill refinement review. The
+            # meta-reflector matches the queue against current auto-skills
+            # and proposes patches; nothing applies automatically.
+            try:
+                from src.memory.conversation import record_skill_refinement_request
+
+                await record_skill_refinement_request(
+                    int(user_id),
+                    user_message=user_message,
+                    assistant_response=assistant_response,
+                    quality_score=score,
+                )
+            except (ValueError, TypeError):
+                pass
+            except Exception as ref_exc:  # noqa: BLE001
+                logger.debug("Skill refinement enqueue failed (non-critical): %s", ref_exc)
 
         # Check quality trend — warn on degradation
         try:
@@ -2912,6 +3147,18 @@ async def _run_reflector_background(
                 )
         except (ValueError, TypeError):
             pass
+
+        # Wave 1.2: every Nth turn, run a holistic meta-reflection that looks
+        # at the recent reflector outputs + auto-skills and proposes
+        # consolidations / retirements / persona refinements. Owner-gated —
+        # results land in Redis at meta_reflector_pending:{user_id}, never
+        # auto-applied. Mirrors Hermes's every-15-tasks meta-nudge.
+        try:
+            from src.agents.meta_reflector_agent import maybe_run_meta_reflector
+
+            await maybe_run_meta_reflector(user_id)
+        except Exception as meta_exc:  # noqa: BLE001
+            logger.debug("Meta-reflector skipped (non-critical): %s", meta_exc)
 
     except Exception as e:
         logger.debug("Reflector background task failed (non-critical): %s", e)

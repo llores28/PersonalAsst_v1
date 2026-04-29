@@ -125,50 +125,16 @@ def _promised_artifact_without_delivery(user_message: str, assistant_response: s
 def _is_poisoned_workspace_learning(text: str) -> bool:
     """Return True if a reflector learning would poison workspace tool routing.
 
-    When the LLM fails to call workspace tools (a routing/model issue),
-    the reflector often learns things like 'Drive may require re-auth'
-    or 'connector path needs fixing'. These get stored in Mem0 and
-    cause future turns to also skip calling the tools — a vicious cycle.
+    When the LLM fails to call workspace tools (a routing/model issue), the
+    reflector often summarizes the failure as a workflow ("ask user to paste",
+    "cannot access gmail in-chat"). Stored in Mem0, those become a
+    self-reinforcing refusal loop on future turns. Centralized in
+    ``src.memory.poison_filter`` so write-time and read-time filters stay
+    in lockstep.
     """
-    lowered = text.lower()
-    _POISON_PHRASES = (
-        "re-auth", "reauth", "re-authorize", "reauthorize",
-        "connector path", "connector issue", "session issue",
-        "drive session", "drive connector", "drive inventory",
-        "authenticated inventory", "authenticated listing",
-        "tool access needs", "tool access to be fixed",
-        "tools need fixing", "tools are broken", "tools aren't working",
-        "not available in this turn", "isn't available in this turn",
-        "not receiving the private", "require re-authorization",
-        "may require re-", "needs to be fixed",
-        "access may require", "access needs",
-        # "Use the connected tool" workarounds learned WHEN the tool
-        # actually failed during the conversation. After the underlying
-        # issue is fixed (auth recovered, MCP healthy), these become
-        # poisonous: they teach the agent to refuse to try, ask for paste,
-        # or send the user to OAuth even when neither is necessary.
-        "ask the user to provide", "ask user to provide",
-        "ask for user to provide",
-        "ask the user to paste", "ask user to paste",
-        "paste the email", "paste the message",
-        "request the user to complete oauth",
-        "request the user to authorize",
-        "should not claim access", "must not claim access",
-        "claiming access",
-        "should clarify that it cannot",
-        "should clarify that the assistant cannot",
-        "offer a workaround", "offer the workaround",
-        "without demonstrating access",
-        "without verifying the user",
-        "spoken-style summary",
-        "in this environment/session the assistant was unable",
-        "in this session the assistant was unable",
-        "unable to access the user",
-        "cannot access gmail", "can't access gmail",
-        "cannot access calendar", "can't access calendar",
-        "cannot access drive", "can't access drive",
-    )
-    return any(phrase in lowered for phrase in _POISON_PHRASES)
+    from src.memory.poison_filter import is_poisoned_learning
+
+    return is_poisoned_learning(text)
 
 
 def _normalize_reflection(reflection: dict, user_message: str, assistant_response: str) -> dict:
@@ -257,13 +223,25 @@ async def reflect_on_interaction(
                 logger.info("Reflector BLOCKED poisoned workflow: %s", wf[:100])
             else:
                 from src.memory.mem0_client import add_memory
-                await add_memory(
+                from src.skills.skill_writer import maybe_crystallize_workflow
+
+                add_result = await add_memory(
                     wf,
                     user_id=user_id,
                     metadata={"type": "procedural", "source": "reflector"},
                 )
                 logger.info("Reflector learned workflow for user %s: %s",
                             user_id, wf)
+
+                # Wave 1.1: when the same workflow has been observed often
+                # enough (Mem0 dedup bumps crystallize_count on each match),
+                # promote it to a first-class SKILL.md the loader will pick
+                # up on the next session. Never raises.
+                await maybe_crystallize_workflow(
+                    wf,
+                    user_id=user_id,
+                    add_memory_result=add_result,
+                )
 
         return reflection
 

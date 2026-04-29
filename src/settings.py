@@ -93,6 +93,34 @@ class Settings(BaseSettings):
     # ── User Skills ──
     user_skills_dir: str = Field(default="src/user_skills", description="Directory for user-installed SKILL.md skills")
 
+    # ── Meta-reflector (Wave 1.2) ──
+    # Every N turns we run a holistic review that looks at recent reflector
+    # outputs + the current auto-skill set and proposes consolidations,
+    # retirements, or persona refinements. Mirrors Hermes's "every 15 tasks"
+    # nudge. Set to 0 to disable.
+    meta_reflector_interval: int = Field(
+        default=15,
+        description="Turn cadence for meta-reflector (0 disables).",
+    )
+    meta_reflector_window: int = Field(
+        default=15,
+        description="How many recent reflector outputs the meta-reflector reviews.",
+    )
+
+    # ── Skill FTS5 hybrid retrieval (Wave A.2) ──
+    # When enabled, SkillRegistry.match_skills unions the existing keyword-tag
+    # matcher with SQLite FTS5 BM25 results so fuzzy phrasings still surface
+    # the right skill. Off by default to preserve current routing behavior;
+    # opt-in once the catalog grows past a handful of skills.
+    skill_fts_enabled: bool = Field(
+        default=False,
+        description="Enable hybrid FTS5+keyword skill retrieval in SkillRegistry.",
+    )
+    skill_fts_top_k: int = Field(
+        default=5,
+        description="How many FTS5 hits to merge per match_skills call.",
+    )
+
     # ── Google Workspace (optional, Phase 2+) ──
     google_oauth_client_id: str = Field(default="")
     google_oauth_client_secret: str = Field(default="")

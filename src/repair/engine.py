@@ -1077,9 +1077,53 @@ async def run_self_healing_pipeline(
     # Initialize pipeline state
     pipeline = RepairPipelineState(ticket_id=0)
 
+    # Wave 2.4 + 2.5: parallel FSM tracking for audit + Redis checkpoint.
+    # The FSMRunner mirrors every ``pipeline.mark_stage`` call below via
+    # ``_advance_fsm`` and emits a structured transition log entry. Every
+    # transition also writes the snapshot to Redis under
+    # ``repair_checkpoint:{user_id}`` (24h TTL) so a container restart leaves
+    # the audit trail recoverable. Terminal phases (DONE/FAILED) clear the
+    # checkpoint eagerly. ``on_transition`` is best-effort — checkpoint
+    # failures never abort the repair turn.
+    from src.agents.fsm import new_runner, map_repair_stage, Phase as _FSMPhase
+    from src.memory.conversation import (
+        clear_repair_checkpoint as _clear_repair_checkpoint,
+        save_repair_checkpoint as _save_repair_checkpoint,
+    )
+
+    def _on_fsm_transition(transition_entry) -> None:
+        """Persist FSM state to Redis after every transition. Also fires the
+        eager-clear path on terminal phases. Schedules async work via
+        asyncio.create_task so the synchronous transition() call doesn't
+        block on Redis."""
+        try:
+            snapshot = fsm_runner.state.to_dict()
+            if transition_entry.to_phase in {_FSMPhase.DONE, _FSMPhase.FAILED}:
+                asyncio.create_task(_clear_repair_checkpoint(user_telegram_id))
+            else:
+                asyncio.create_task(_save_repair_checkpoint(user_telegram_id, snapshot))
+        except Exception:
+            pass  # observability hook must never break the FSM
+
+    fsm_runner = new_runner(
+        f"repair-{user_telegram_id}-{int(time.time())}",
+        initial_payload={
+            "user_telegram_id": user_telegram_id,
+            "error_summary": error_description[:120],
+            "source": source,
+        },
+        on_transition=_on_fsm_transition,
+    )
+
+    def _advance_fsm(stage: PipelineStage, reason: str = "") -> None:
+        target = map_repair_stage(stage.value)
+        if target != fsm_runner.phase:
+            fsm_runner.transition(target, reason=reason or stage.value, payload={"stage": stage.value})
+
     try:
         # ── Stage 1: DEBUGGER ───────────────────────────────────────────────
         pipeline.mark_stage(PipelineStage.DEBUGGING)
+        _advance_fsm(PipelineStage.DEBUGGING, "running DebuggerAgent")
         logger.info("[Pipeline] Stage 1: Running DebuggerAgent")
 
         debug_result = await run_debugger_analysis(
@@ -1109,6 +1153,7 @@ async def run_self_healing_pipeline(
 
         # ── Stage 2: TICKET CREATION ─────────────────────────────────────
         pipeline.mark_stage(PipelineStage.TICKET_CREATED)
+        _advance_fsm(PipelineStage.TICKET_CREATED, "creating ticket")
         logger.info("[Pipeline] Stage 2: Creating RepairTicket")
 
         ticket_result = await create_structured_ticket(
@@ -1134,6 +1179,7 @@ async def run_self_healing_pipeline(
 
         # ── Stage 3: PROGRAMMER ───────────────────────────────────────────
         pipeline.mark_stage(PipelineStage.PROGRAMMING)
+        _advance_fsm(PipelineStage.PROGRAMMING, f"generating fix for ticket {ticket_id}")
         logger.info("[Pipeline] Stage 3: Running ProgrammerAgent (ticket=%s)", ticket_id)
 
         fix_result = await run_programmer_fix_generation(
@@ -1167,6 +1213,7 @@ async def run_self_healing_pipeline(
 
         # ── Stage 4: QUALITY CONTROL ───────────────────────────────────────
         pipeline.mark_stage(PipelineStage.QA_VALIDATION)
+        _advance_fsm(PipelineStage.QA_VALIDATION, f"validating fix for ticket {ticket_id}")
         logger.info("[Pipeline] Stage 4: Running QualityControlAgent (ticket=%s)", ticket_id)
 
         # Perform dry-run of patch
@@ -1221,8 +1268,58 @@ async def run_self_healing_pipeline(
         # GO decision - proceed to sandbox
         logger.info("[Pipeline] QA approved fix, proceeding to sandbox")
 
+        # Wave A.2: deterministic safety floor under the LLM QA decision.
+        # Even when the agent says GO, run pure-Python predicates (security
+        # patterns, patch-applies, test allowlist, files-in-scope) and reject
+        # if any BLOCKER trips. Catches the case where the LLM signed off on
+        # a patch with eval()/shell=True/etc. that would have shipped.
+        from src.agents.subtask_verifier import (
+            make_repair_verifier,
+            run_subtask_checks,
+            aggregate_decision,
+        )
+        _subtask_results = run_subtask_checks(
+            diff_content=fix_model.unified_diff or "",
+            declared_affected_files=list(fix_model.affected_files or []),
+            test_plan=list(fix_model.test_plan or []),
+            dry_run_output=dry_run_output,
+        )
+        fsm_runner.set_verifier(make_repair_verifier(
+            diff_content=fix_model.unified_diff or "",
+            declared_affected_files=list(fix_model.affected_files or []),
+            test_plan=list(fix_model.test_plan or []),
+            dry_run_output=dry_run_output,
+        ))
+        deterministic_decision = aggregate_decision(_subtask_results)
+        if deterministic_decision == "NO_GO":
+            blocker_msgs = [
+                f"• {r.name}: {r.message}"
+                for r in _subtask_results if r.failed
+            ]
+            logger.warning(
+                "[Pipeline] Deterministic verifier overrode LLM GO: %s",
+                "; ".join(blocker_msgs),
+            )
+            await _update_ticket_status(
+                ticket_id, "verification_failed",
+                "Deterministic safety floor blocked the patch.",
+            )
+            return {
+                "success": False,
+                "ticket_id": ticket_id,
+                "stage_reached": "qa",
+                "decision": "NO_GO",
+                "message": (
+                    "🛡️ Deterministic safety floor blocked the patch even "
+                    "though the QA agent said GO.\n\n"
+                    "**Blockers:**\n" + "\n".join(blocker_msgs) +
+                    f"\n\nTicket #{ticket_id} requires manual review."
+                ),
+            }
+
         # ── Stage 5: SANDBOX TESTING ──────────────────────────────────────
         pipeline.mark_stage(PipelineStage.SANDBOX_TESTING)
+        _advance_fsm(PipelineStage.SANDBOX_TESTING, f"sandbox testing ticket {ticket_id}")
         logger.info("[Pipeline] Stage 5: Running sandbox tests (ticket=%s)", ticket_id)
 
         # Use existing execute_pending_repair logic but with our patch
@@ -1249,6 +1346,7 @@ async def run_self_healing_pipeline(
 
         # ── Stage 6: AWAITING DEPLOY ──────────────────────────────────────
         pipeline.mark_stage(PipelineStage.AWAITING_APPROVAL)
+        _advance_fsm(PipelineStage.AWAITING_APPROVAL, f"awaiting owner approval for ticket {ticket_id}")
         logger.info("[Pipeline] Stage 6: Fix ready for deploy (ticket=%s)", ticket_id)
 
         # Update ticket to ready_for_deploy
@@ -1268,16 +1366,19 @@ async def run_self_healing_pipeline(
                 f"The fix is ready for your approval. Use **/ticket approve {ticket_id}** "
                 f"or the dashboard to deploy."
             ),
+            "fsm_snapshot": fsm_runner.state.to_dict(),
         }
 
     except Exception as e:
         logger.exception("[Pipeline] Unhandled error in self-healing pipeline: %s", e)
+        fsm_runner.fail(f"unhandled error: {type(e).__name__}: {str(e)[:120]}")
         return {
             "success": False,
             "ticket_id": pipeline.ticket_id if pipeline.ticket_id else None,
             "stage_reached": pipeline.current_stage.value,
             "decision": "FAILED",
             "message": f"❌ Pipeline failed with error: {e}\n\nTicket may require manual cleanup.",
+            "fsm_snapshot": fsm_runner.state.to_dict(),
         }
 
 

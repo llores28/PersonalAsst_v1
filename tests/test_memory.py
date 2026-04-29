@@ -326,10 +326,18 @@ class TestMem0Dedup:
 
         result = await add_memory("the user likes coffee", user_id="u1")
 
-        mem.update.assert_called_once_with("abc", "the user likes coffee")
+        # Wave 1.1 added crystallize_count metadata propagation on dedup so
+        # the meta-reflector can crystallize repeated workflows into SKILL.md.
+        mem.update.assert_called_once()
+        update_args, update_kwargs = mem.update.call_args
+        assert update_args[0] == "abc"
+        assert update_args[1] == "the user likes coffee"
+        assert update_kwargs.get("metadata", {}).get("crystallize_count") == 2
         mem.add.assert_not_called()
-        assert result == {"deduplicated": True, "id": "abc",
-                          "score": DEDUP_THRESHOLD + 0.05}
+        assert result["deduplicated"] is True
+        assert result["id"] == "abc"
+        assert result["score"] == DEDUP_THRESHOLD + 0.05
+        assert result.get("metadata", {}).get("crystallize_count") == 2
 
     async def test_inserts_when_score_below_threshold(self, monkeypatch):
         from src.memory.mem0_client import DEDUP_THRESHOLD, add_memory

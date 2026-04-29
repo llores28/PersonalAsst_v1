@@ -207,6 +207,9 @@ async def main() -> None:
             BotCommand(command="voice", description="View or set TTS voice for audio replies"),
             BotCommand(command="tickets", description="List open repair tickets"),
             BotCommand(command="ticket", description="Approve or close a repair ticket"),
+            BotCommand(command="meta", description="Review meta-reflector proposals"),
+            BotCommand(command="repair_status", description="Show repair FSM checkpoint"),
+            BotCommand(command="refinement", description="Inspect skill refinement queue"),
             BotCommand(command="cancel", description="Cancel current operation"),
         ]
         

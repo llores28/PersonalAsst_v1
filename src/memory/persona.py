@@ -143,84 +143,13 @@ def _filter_stale_memories(
 ) -> list[dict]:
     """Remove memories that contradict the current system state.
 
-    When Google Workspace tools are connected and operational, memories
-    claiming they are broken or need fixing would poison the persona prompt
-    and cause the LLM to avoid calling working tools.
+    Thin wrapper around the shared ``src.memory.poison_filter`` so the
+    write-time (reflector) and read-time (persona) passes use one phrase
+    list + regex source of truth.
     """
-    if not workspace_connected:
-        return memories
+    from src.memory.poison_filter import filter_stale_memories
 
-    # Phrases that indicate stale "tools are broken" memories.
-    # These were learned during past debugging sessions and are no longer true.
-    _STALE_WORKSPACE_PHRASES = [
-        "needs authenticated",
-        "needs connected",
-        "tool access to be fixed",
-        "tool access needs",
-        "tools need fixing",
-        "tools are broken",
-        "tools aren't working",
-        "drive tool fix",
-        "drive session",
-        "session issue",
-        "connector issue",
-        "can't access drive",
-        "cannot access drive",
-        "can't access gmail",
-        "cannot access gmail",
-        "can't access calendar",
-        "cannot access calendar",
-        # Reflector "workaround" patterns: when the connected tool path
-        # transiently failed, the reflector occasionally learned that the
-        # right move is to ASK the user to paste content or re-do OAuth.
-        # After the underlying issue is fixed, those memories actively
-        # poison future runs — the agent reads them and refuses to call
-        # tools that now work.
-        "ask for user to provide",
-        "ask the user to provide",
-        "ask user to provide",
-        "ask the user to paste",
-        "ask user to paste",
-        "paste the email",
-        "paste the message",
-        "request the user to complete oauth",
-        "request the user to authorize",
-        "should not claim access",
-        "must not claim access",
-        "claiming access",
-        "should clarify that it cannot",
-        "should clarify that the assistant cannot",
-        "offer a workaround",
-        "offer the workaround",
-        "without demonstrating access",
-        "without verifying the user",
-        "spoken-style summary",
-        "in this environment/session the assistant was unable",
-        "in this session the assistant was unable",
-        "unable to access the user",
-        "drive access to be fixed",
-        "before continuing other tasks",
-        "require re-authorization",
-        "may require re-",
-        "re-authorize",
-        "reauthorize",
-        "authenticated inventory",
-        "authenticated listing",
-        "not available in this turn",
-        "isn't available in this turn",
-        "connector path",
-        "drive inventory",
-        "drive connector",
-    ]
-
-    filtered = []
-    for mem in memories:
-        text = mem.get("memory", mem.get("text", "")).lower()
-        if any(phrase in text for phrase in _STALE_WORKSPACE_PHRASES):
-            logger.debug("Filtered stale memory: %s", text[:80])
-            continue
-        filtered.append(mem)
-    return filtered
+    return filter_stale_memories(memories, workspace_connected=workspace_connected)
 
 
 async def build_dynamic_persona_prompt(

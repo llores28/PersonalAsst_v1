@@ -85,6 +85,11 @@ class SkillRegistry:
 
     def __init__(self) -> None:
         self._skills: dict[str, SkillDefinition] = {}
+        # Lazy FTS5 index — only built when settings.skill_fts_enabled is True
+        # AND match_skills is called. Rebuilt opportunistically when a new
+        # skill is registered after the index already exists.
+        self._fts_index = None  # type: ignore[var-annotated]
+        self._fts_dirty = True
 
     # ------------------------------------------------------------------
     # Registration
@@ -95,6 +100,7 @@ class SkillRegistry:
         if skill.id in self._skills:
             logger.warning("Skill '%s' replaced (was already registered)", skill.id)
         self._skills[skill.id] = skill
+        self._fts_dirty = True
         logger.debug(
             "Skill registered: %s (group=%s, tools=%d, source=%s)",
             skill.id,
@@ -201,8 +207,52 @@ class SkillRegistry:
         """Remove a skill by ID.  Returns ``True`` if it existed."""
         removed = self._skills.pop(skill_id, None)
         if removed:
+            self._fts_dirty = True
             logger.debug("Skill unregistered: %s", skill_id)
         return removed is not None
+
+    # ------------------------------------------------------------------
+    # FTS5 hybrid retrieval (Wave A.2 / 4.9)
+    # ------------------------------------------------------------------
+
+    def _ensure_fts_index(self):
+        """Build (or rebuild) the FTS5 index from current skills.
+
+        Lazy: only runs when match_skills is called AND settings.skill_fts_enabled
+        is True. Cheap to rebuild — a few hundred skills index in single-digit
+        milliseconds, and we only do it when the dirty flag is set.
+        """
+        from src.skills.fts5_index import SkillFTS5Index, IndexedSkill
+        if self._fts_index is None:
+            self._fts_index = SkillFTS5Index()
+        if self._fts_dirty:
+            indexed = [
+                IndexedSkill(
+                    skill_id=s.id,
+                    name=getattr(s, "name", s.id),
+                    description=s.description or "",
+                    tags=list(s.tags or []),
+                    routing_hints=list(s.routing_hints or []),
+                    instructions=s.instructions or "",
+                )
+                for s in self._skills.values()
+                if s.is_active
+            ]
+            self._fts_index.rebuild(indexed)
+            self._fts_dirty = False
+        return self._fts_index
+
+    def _fts_match_ids(self, user_message: str, top_k: int) -> set[str]:
+        """Return skill IDs that the FTS5 index ranks against the message.
+        Empty set on any failure — never raises so the keyword matcher
+        always wins as a fallback."""
+        try:
+            index = self._ensure_fts_index()
+            results = index.query(user_message, top_k=top_k)
+            return {r.skill_id for r in results if r.skill_id in self._skills}
+        except Exception as exc:  # noqa: BLE001 — index is best-effort
+            logger.debug("FTS5 skill match failed (degrading to keyword): %s", exc)
+            return set()
 
     # ------------------------------------------------------------------
     # Retrieval
@@ -346,6 +396,20 @@ class SkillRegistry:
                 if keywords & message_tokens:
                     matched.add(skill.id)
                     break
+
+        # Wave A.2 — hybrid retrieval. When enabled, union the keyword-tag
+        # matches with FTS5 BM25-ranked hits so fuzzy phrasings still surface
+        # the right skill. Off by default; enables with skill_fts_enabled=True.
+        try:
+            from src.settings import settings as _settings
+            if getattr(_settings, "skill_fts_enabled", False):
+                top_k = int(getattr(_settings, "skill_fts_top_k", 5) or 5)
+                fts_ids = self._fts_match_ids(user_message, top_k=top_k)
+                # Honor the workspace-cohesion + INTERNAL rules below by
+                # merging into ``matched`` BEFORE the fallback check.
+                matched.update(fts_ids)
+        except Exception as exc:  # noqa: BLE001 — settings/import errors degrade quietly
+            logger.debug("FTS5 hybrid retrieval skipped: %s", exc)
 
         # Fallback: if nothing matched (e.g. generic greeting), load all active
         active_ids = {s.id for s in self._skills.values() if s.is_active}

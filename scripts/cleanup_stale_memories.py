@@ -1,56 +1,41 @@
-"""One-time cleanup: remove stale Mem0 memories about Drive tools being broken
-and clear the poisoned RedisSession conversation history.
+"""One-time cleanup: remove stale Mem0 memories about workspace tools being
+broken or unreachable, and clear the poisoned RedisSession conversation
+history so the next turn starts clean.
+
+Reuses the shared ``src.memory.poison_filter`` so the cleanup phrase list
+stays in lockstep with the runtime filter.
 
 Run inside the container:
     docker compose exec assistant python scripts/cleanup_stale_memories.py
 """
 
 import asyncio
-import sys
 import os
+import sys
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 async def main():
+    from src.memory.mem0_client import delete_memory, get_all_memories
+    from src.memory.poison_filter import is_poisoned_learning
     from src.settings import settings
-    from src.memory.mem0_client import get_all_memories, delete_memory
 
     user_id = str(settings.owner_telegram_id)
     print(f"Cleaning stale memories for user {user_id}...")
-
-    # Stale phrases that indicate "Drive tools are broken" memories
-    stale_phrases = [
-        "needs authenticated",
-        "needs connected",
-        "tool access to be fixed",
-        "tool access needs",
-        "tools need fixing",
-        "tools are broken",
-        "tools aren't working",
-        "drive tool fix",
-        "drive session",
-        "session issue",
-        "connector issue",
-        "can't access drive",
-        "cannot access drive",
-        "drive access to be fixed",
-        "before continuing other tasks",
-        "expects google drive tool access to be fixed",
-    ]
 
     all_mems = await get_all_memories(user_id)
     print(f"Found {len(all_mems)} total memories")
 
     deleted = 0
     for mem in all_mems:
-        text = mem.get("memory", mem.get("text", "")).lower()
+        text = mem.get("memory") or mem.get("text") or ""
         mem_id = mem.get("id")
         if not mem_id:
             continue
-        if any(phrase in text for phrase in stale_phrases):
-            print(f"  DELETING: [{mem_id}] {text[:100]}")
+        if is_poisoned_learning(text):
+            print(f"  DELETING: [{mem_id}] {text[:120]}")
             await delete_memory(mem_id)
             deleted += 1
 
@@ -61,7 +46,7 @@ async def main():
     r = aioredis.from_url(settings.redis_url, decode_responses=True)
     session_key = f"agent_session:{user_id}"
     existed = await r.delete(session_key)
-    # Also try pattern-based cleanup for any session variants
+    # Pattern-based cleanup for any session variants
     keys = []
     async for key in r.scan_iter(f"agent_session:{user_id}*"):
         keys.append(key)
@@ -70,7 +55,7 @@ async def main():
     await r.aclose()
     print(f"Cleared RedisSession: {session_key} (existed={existed}, pattern_keys={len(keys)})")
 
-    # Also clear the registry cache key pattern
+    # Report on conversation keys without deleting (only the session was poisoned)
     r2 = aioredis.from_url(settings.redis_url, decode_responses=True)
     conv_keys = []
     async for key in r2.scan_iter(f"conv:{user_id}*"):

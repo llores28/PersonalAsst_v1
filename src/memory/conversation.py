@@ -260,6 +260,186 @@ async def get_quality_trend(user_id: int, window: int = 5) -> Optional[float]:
     return sum(scores) / len(scores)
 
 
+# ── Meta-reflector turn counter (Wave 1.2) ──────────────────────────────
+
+
+def _meta_reflector_count_key(user_id: int) -> str:
+    return f"meta_reflector_count:{user_id}"
+
+
+def _meta_reflector_pending_key(user_id: int) -> str:
+    return f"meta_reflector_pending:{user_id}"
+
+
+async def increment_meta_reflector_count(user_id: int) -> int:
+    """Bump the post-turn counter the meta-reflector consults, returning the
+    new value. 30-day TTL so an idle user doesn't keep a stale counter forever.
+    """
+    r = await get_redis()
+    key = _meta_reflector_count_key(user_id)
+    new_count = await r.incr(key)
+    await r.expire(key, 86400 * 30)
+    return int(new_count)
+
+
+async def store_meta_reflector_proposals(user_id: int, payload: str, *, ttl_seconds: int = 86400 * 7) -> None:
+    """Persist the latest meta-reflector JSON payload for owner review. 7-day
+    TTL by default — long enough to survive a weekend, short enough that stale
+    proposals don't pile up if the owner ignores them."""
+    r = await get_redis()
+    await r.set(_meta_reflector_pending_key(user_id), payload, ex=ttl_seconds)
+
+
+async def get_meta_reflector_proposals(user_id: int) -> Optional[str]:
+    """Return the last meta-reflector payload for the user, or None."""
+    r = await get_redis()
+    return await r.get(_meta_reflector_pending_key(user_id))
+
+
+async def clear_meta_reflector_proposals(user_id: int) -> None:
+    r = await get_redis()
+    await r.delete(_meta_reflector_pending_key(user_id))
+
+
+# ── Skill refinement queue (Wave 1.3) ───────────────────────────────────
+
+
+def _skill_refinement_queue_key(user_id: int) -> str:
+    return f"skill_refinement_queue:{user_id}"
+
+
+_SKILL_REFINEMENT_QUEUE_MAX = 25
+_SKILL_REFINEMENT_TTL_SECONDS = 86400 * 14  # 14 days — survives a sparse user week
+
+
+async def record_skill_refinement_request(
+    user_id: int,
+    *,
+    user_message: str,
+    assistant_response: str,
+    quality_score: float,
+) -> None:
+    """Record a low-quality turn for the meta-reflector to review against the
+    auto-skill set. The meta-reflector matches each queued turn against the
+    current SkillRegistry and proposes patches to skills whose
+    tags/routing-hints actually fired on the turn.
+
+    Bounded queue (25 entries) to keep Redis usage and meta-reflector input
+    sizes predictable. Older entries fall off via LTRIM.
+    """
+    import json as _json
+    r = await get_redis()
+    payload = _json.dumps({
+        "user_message": user_message[:1000],  # cap to keep entries small
+        "assistant_response": assistant_response[:1000],
+        "quality_score": quality_score,
+    })
+    key = _skill_refinement_queue_key(user_id)
+    await r.rpush(key, payload)
+    await r.ltrim(key, -_SKILL_REFINEMENT_QUEUE_MAX, -1)
+    await r.expire(key, _SKILL_REFINEMENT_TTL_SECONDS)
+
+
+async def drain_skill_refinement_queue(user_id: int) -> list[dict]:
+    """Read & clear the queue. Used by the meta-reflector on its periodic run.
+    Returns a list of dicts ready for inclusion in the LLM review prompt.
+    """
+    import json as _json
+    r = await get_redis()
+    key = _skill_refinement_queue_key(user_id)
+    raw_entries = await r.lrange(key, 0, -1)
+    await r.delete(key)
+    out: list[dict] = []
+    for raw in raw_entries:
+        try:
+            out.append(_json.loads(raw))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+async def peek_skill_refinement_queue(user_id: int, limit: int = 10) -> list[dict]:
+    """Non-destructive read of the queue for the /refinement Telegram command.
+    Drain semantics belong to the meta-reflector; the user inspecting the
+    queue must not consume it."""
+    import json as _json
+    r = await get_redis()
+    key = _skill_refinement_queue_key(user_id)
+    raw_entries = await r.lrange(key, -limit, -1)
+    out: list[dict] = []
+    for raw in raw_entries:
+        try:
+            out.append(_json.loads(raw))
+        except (ValueError, TypeError):
+            continue
+    return out
+
+
+# ── Repair FSM checkpoint/resume (Wave 2.5) ─────────────────────────────
+
+
+def _repair_checkpoint_key(user_id: int) -> str:
+    return f"repair_checkpoint:{user_id}"
+
+
+# 24-hour TTL: long enough that an owner who steps away mid-repair can come
+# back the next morning and see where the pipeline got to; short enough that
+# a stale "AWAITING_APPROVAL" never lingers indefinitely if the user forgets
+# about it. Terminal phases also delete eagerly via clear_repair_checkpoint.
+_REPAIR_CHECKPOINT_TTL_SECONDS = 86400
+
+
+async def save_repair_checkpoint(user_id: int, snapshot: dict) -> None:
+    """Persist an FSM snapshot for the user's most recent repair attempt.
+
+    Wired into ``run_self_healing_pipeline`` via the FSMRunner's
+    ``on_transition`` hook so every state change is durably recorded. After a
+    container restart, ``get_repair_checkpoint`` exposes the most recent
+    in-flight phase + step to dashboards and commands like ``/tickets``.
+    Best-effort: failures here must never abort the repair turn.
+    """
+    import json as _json
+    try:
+        r = await get_redis()
+        await r.set(
+            _repair_checkpoint_key(user_id),
+            _json.dumps(snapshot, default=str),
+            ex=_REPAIR_CHECKPOINT_TTL_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("save_repair_checkpoint failed (non-critical): %s", exc)
+
+
+async def get_repair_checkpoint(user_id: int) -> Optional[dict]:
+    """Return the user's most recent repair FSM snapshot, or None if no
+    active checkpoint. Terminal-phase snapshots (DONE/FAILED) are normally
+    cleared eagerly, but a snapshot in DONE/FAILED that survived the cleanup
+    race is still returned so callers can see how the run ended.
+    """
+    import json as _json
+    try:
+        r = await get_redis()
+        raw = await r.get(_repair_checkpoint_key(user_id))
+        if not raw:
+            return None
+        return _json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_repair_checkpoint failed (non-critical): %s", exc)
+        return None
+
+
+async def clear_repair_checkpoint(user_id: int) -> None:
+    """Eagerly delete the checkpoint on terminal-phase transitions so the
+    next repair starts clean. Idempotent — never raises."""
+    try:
+        r = await get_redis()
+        await r.delete(_repair_checkpoint_key(user_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("clear_repair_checkpoint failed (non-critical): %s", exc)
+
+
 def _cached_tasks_key(user_id: int) -> str:
     return f"cached_tasks:{user_id}"
 

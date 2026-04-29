@@ -175,7 +175,11 @@ async def cmd_help(message: Message) -> None:
         "/stats — View usage statistics\n"
         "/cancel <job_id> — Cancel a scheduled task\n"
         "/neworg <goal> — AI-powered organization creation\n"
-        "/security — Configure security PIN/questions for repair approvals\n\n"
+        "/security — Configure security PIN/questions for repair approvals\n"
+        "/tickets — List open repair tickets\n"
+        "/repair_status — Show the current repair FSM checkpoint\n"
+        "/meta — Review pending meta-reflector proposals\n"
+        "/refinement — Inspect the skill refinement queue\n\n"
         "Scheduling:\n"
         "• \"Remind me every Monday at 9am to review goals\"\n"
         "• \"Set up a morning brief at 8am\"\n"
@@ -1294,6 +1298,182 @@ async def cmd_ticket(message: Message) -> None:
         )
 
 
+@router.message(Command("meta"))
+async def cmd_meta(message: Message) -> None:
+    """Handle /meta — show pending meta-reflector proposals (Wave A.1).
+
+    The meta-reflector runs every ``meta_reflector_interval`` turns and writes
+    its JSON proposals to ``meta_reflector_pending:{user_id}`` (7-day TTL).
+    Without this surface, proposals rot in Redis unread.
+    """
+    if not await is_allowed(message.from_user.id):
+        return
+
+    from src.memory.conversation import (
+        get_meta_reflector_proposals,
+        clear_meta_reflector_proposals,
+    )
+
+    args = (message.text or "").split(maxsplit=1)
+    sub = args[1].strip().lower() if len(args) > 1 else ""
+
+    if sub == "clear":
+        await clear_meta_reflector_proposals(message.from_user.id)
+        await message.answer("✅ Cleared pending meta-reflector proposals.")
+        return
+
+    raw = await get_meta_reflector_proposals(message.from_user.id)
+    if not raw:
+        await message.answer(
+            "🪞 *Meta-reflector*\n\nNo pending proposals.\n"
+            "The meta-reflector reviews your interactions every "
+            f"{settings.meta_reflector_interval} turns and surfaces any "
+            "skill consolidations, retirements, or persona refinements here.",
+            parse_mode="Markdown",
+        )
+        return
+
+    try:
+        import json as _json
+        payload = _json.loads(raw)
+    except (ValueError, TypeError):
+        await message.answer("Stored proposals are not valid JSON. Use `/meta clear` to reset.", parse_mode="Markdown")
+        return
+
+    lines = ["🪞 *Meta-reflector proposals*\n"]
+    summary = payload.get("summary") or ""
+    if summary:
+        lines.append(f"_{summary[:300]}_\n")
+
+    retire = payload.get("skills_to_retire") or []
+    if retire:
+        lines.append("*Retire:*")
+        for item in retire[:5]:
+            sid = item.get("skill_id", "?")
+            why = (item.get("reason") or "").replace("\n", " ")[:140]
+            lines.append(f"  • `{sid}` — {why}")
+
+    consolidate = payload.get("skills_to_consolidate") or []
+    if consolidate:
+        lines.append("\n*Consolidate:*")
+        for item in consolidate[:5]:
+            ids = ", ".join(f"`{s}`" for s in (item.get("skill_ids") or [])[:4])
+            merged = item.get("merged_id", "?")
+            why = (item.get("reason") or "").replace("\n", " ")[:120]
+            lines.append(f"  • {ids} → `{merged}` — {why}")
+
+    patches = payload.get("skill_patches") or []
+    if patches:
+        lines.append("\n*Skill patches:*")
+        for item in patches[:5]:
+            sid = item.get("skill_id", "?")
+            diag = (item.get("diagnosis") or "").replace("\n", " ")[:140]
+            lines.append(f"  • `{sid}` — {diag}")
+
+    persona = payload.get("persona_refinements") or []
+    if persona:
+        lines.append("\n*Persona refinements:*")
+        for item in persona[:5]:
+            trait = item.get("trait", "?")
+            evidence = (item.get("evidence") or "").replace("\n", " ")[:140]
+            lines.append(f"  • {trait} — {evidence}")
+
+    if not (retire or consolidate or patches or persona):
+        lines.append("_No actionable proposals — the meta-reflector chose to be conservative._")
+
+    lines.append("\nUse `/meta clear` to dismiss.")
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(Command("repair_status"))
+async def cmd_repair_status(message: Message) -> None:
+    """Handle /repair_status — show the most recent repair FSM checkpoint.
+
+    Reads ``repair_checkpoint:{user_id}`` (24h TTL) populated by the
+    repair pipeline's FSM ``on_transition`` hook. Lets the owner see where
+    a repair flow got to after a container restart or interruption.
+    """
+    if not await is_allowed(message.from_user.id):
+        return
+
+    from src.memory.conversation import get_repair_checkpoint
+
+    snapshot = await get_repair_checkpoint(message.from_user.id)
+    if not snapshot:
+        await message.answer(
+            "🔧 *Repair status*\n\nNo recent repair checkpoint. "
+            "Either no repair has run in the last 24h, or the last "
+            "one completed cleanly (terminal phases clear the checkpoint).",
+            parse_mode="Markdown",
+        )
+        return
+
+    flow_id = snapshot.get("flow_id", "?")
+    phase = snapshot.get("phase", "?")
+    step_id = snapshot.get("step_id", 0)
+    history = snapshot.get("history") or []
+    payload = snapshot.get("payload") or {}
+
+    lines = [
+        "🔧 *Repair FSM checkpoint*\n",
+        f"Flow: `{flow_id}`",
+        f"Phase: `{phase}` (step {step_id})",
+    ]
+    err = payload.get("error_summary")
+    if err:
+        lines.append(f"Trigger: _{str(err)[:160]}_")
+
+    if history:
+        lines.append("\n*Recent transitions:*")
+        for entry in history[-6:]:
+            from_p = entry.get("from_phase") or "·"
+            to_p = entry.get("to_phase", "?")
+            reason = (entry.get("reason") or "").replace("\n", " ")[:80]
+            lines.append(f"  • {from_p} → {to_p}  _{reason}_")
+
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+@router.message(Command("refinement"))
+async def cmd_refinement(message: Message) -> None:
+    """Handle /refinement — peek at queued low-quality turns awaiting review.
+
+    Wave 1.3 enqueues a turn here whenever the per-turn reflector returns
+    quality_score < 0.4 on a turn that fired an auto-skill. The meta-reflector
+    drains the queue on its next run; this command lets the owner inspect
+    what's pending without consuming it.
+    """
+    if not await is_allowed(message.from_user.id):
+        return
+
+    from src.memory.conversation import peek_skill_refinement_queue
+
+    entries = await peek_skill_refinement_queue(message.from_user.id, limit=10)
+    if not entries:
+        await message.answer(
+            "🧪 *Skill refinement queue*\n\nEmpty — no low-quality turns "
+            "are pending review. The next meta-reflector run will have "
+            "nothing to chew on.",
+            parse_mode="Markdown",
+        )
+        return
+
+    lines = [f"🧪 *Skill refinement queue* ({len(entries)} pending)\n"]
+    for i, entry in enumerate(entries[-5:], 1):
+        score = entry.get("quality_score", 0.0)
+        user_msg = (entry.get("user_message") or "").replace("\n", " ")[:120]
+        lines.append(f"*{i}.* score=`{score:.2f}` — _{user_msg}_")
+
+    if len(entries) > 5:
+        lines.append(f"\n_…showing 5 of {len(entries)}._")
+
+    lines.append(
+        f"\nNext meta-reflector run: every {settings.meta_reflector_interval} turns "
+        "(use `/meta` to see proposals once they're emitted)."
+    )
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
 @router.callback_query(F.data.startswith("repair_approve:"))
 async def cb_repair_approve(callback: CallbackQuery) -> None:
     """Inline button: owner taps '✅ Apply fix now'."""
@@ -1970,12 +2150,13 @@ async def handle_message(message: Message) -> None:
 
     # Phase 6: Voice message support
     if message.voice:
-        try:
-            await message.answer_chat_action(action="typing")
-        except Exception:
-            pass
+        from src.bot.handler_utils import _typing_action
         from src.bot.voice import transcribe_voice
-        text = await transcribe_voice(message.voice.file_id, message.bot)
+        # Whisper transcription typically takes 3-15s — wrap in
+        # ChatActionSender so the "typing..." indicator stays visible
+        # instead of clearing after Telegram's 5s TTL.
+        async with _typing_action(message, action="typing"):
+            text = await transcribe_voice(message.voice.file_id, message.bot)
         if text.startswith("("):
             await message.answer(text)
             return
