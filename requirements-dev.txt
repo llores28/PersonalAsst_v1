@@ -4,3 +4,10 @@ pytest-asyncio>=0.24.0
 pytest-cov>=6.0.0
 ruff>=0.8.0
 mypy>=1.13.0
+
+# NOTE: this file is also installed inside Atlas's `dev` Docker stage (see
+# Dockerfile line ~42). Anything host-machine-only (e.g., the Nexus sibling-
+# clone editable install) must NOT be added here — put it in the explicit
+# host-setup step in `docs/RUNBOOK.md` "First-time setup" instead. The
+# `-e ../Nexus` install lives there because the Docker build context can't
+# see the parent directory.

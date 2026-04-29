@@ -4,9 +4,18 @@ description: Creates PDFs from text/templates, converts HTML/Markdown to PDF, an
 version: 1.0.0
 author: user
 tags:
-  - pdf  - conversion  - markdown  - html  - templating  - extraction  - document-generation
+  - pdf
+  - conversion
+  - markdown
+  - html
+  - templating
+  - extraction
+  - document-generation
 routing_hints:
-  - "convert my markdown or html into a pdf"  - "generate a pdf from a template and the content I provide"  - "extract the text from an existing pdf and return it"  - "help me produce a pdf with the right title, sections, and styling"
+  - "convert my markdown or html into a pdf"
+  - "generate a pdf from a template and the content I provide"
+  - "extract the text from an existing pdf and return it"
+  - "help me produce a pdf with the right title, sections, and styling"
 requires_skills: []
 extends_skill: null
 tools: []

@@ -3,7 +3,11 @@ name: Devotional Style Guide
 description: Guidelines for generating daily devotionals in the user's preferred style
 version: 1.0.0
 author: user
-tags: [devotional, style, preferences, writing]
+tags:
+  - devotional
+  - style
+  - preferences
+  - writing
 routing_hints:
   - "when writing devotionals"
   - "daily devotional style"

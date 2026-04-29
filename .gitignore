@@ -29,17 +29,11 @@ ENV/
 # Claude Code per-user state (project-shared settings.json IS committed)
 .claude/settings.local.json
 
-# Vendored external git repos (convert to submodule before tracking)
-bootstrap/Nexus/
-
-# Deprecated forked CLI copy — superseded by the editable Nexus/ install
-# (`nexus` command). Kept on disk only as a historical artifact; do NOT
-# re-track. See docs/CHANGELOG.md 2026-04-26 for the migration record.
-bootstrap/
-
-# Nexus toolkit clone — its own git repo, edited and committed elsewhere.
-# Project consumes via editable pip install. Never commit from PersonalAsst.
-Nexus/
+# Nexus moved to ../Nexus on 2026-04-29 (sibling-clone refactor; see docs/RUNBOOK.md
+# "First-time setup"). The previous nested-clone working tree is preserved at
+# Nexus.archive-2026-04-29/ and can be deleted manually once the new layout
+# is verified in production.
+Nexus.archive-*/
 
 # Nexus runtime state (regenerable; state.json, journal/, decisions/, dashboards)
 .nexus/
@@ -49,10 +43,6 @@ BOOTSTRAP.md
 
 # Windsurf rules/skills/workflows ARE committed (they form the Nexus operating system)
 # .windsurf/  <-- intentionally tracked
-
-# Leftover bootstrap backup dirs (never committed)
-bootstrap-backup*/
-bootstrap_backup*/
 
 # Docker volumes (local data)
 postgres_data/

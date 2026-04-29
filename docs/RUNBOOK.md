@@ -1,5 +1,39 @@
 # Runbook — PersonalAsst
 
+## First-time setup (local dev machine)
+
+Atlas runs entirely from Docker Compose at runtime. The host venv is only needed for local dev tasks (running tests, regenerating the dashboard, scaffolding tools). The CLI tooling lives in a sibling repo so Atlas's tree stays clean for Docker builds and Cloud Run deployment.
+
+```bash
+# 1. Clone Atlas (consumer) and Nexus (dev-time CLI) as siblings.
+cd d:/PyProjects   # (or wherever you keep checkouts)
+git clone https://github.com/llores28/PersonalAsst.git
+git clone https://github.com/llores28/Nexus.git
+
+# 2. Set up Atlas's venv and install both runtime + dev deps.
+cd PersonalAsst
+python -m venv .venv
+.venv/Scripts/activate          # Windows (Git Bash). Use `source .venv/bin/activate` on Unix.
+pip install -r requirements-dev.txt
+pip install -e ../Nexus         # host-only — the dev Docker stage skips this
+                                # because ../Nexus is outside the build context.
+
+# 3. Verify nexus CLI is wired to the sibling clone.
+nexus --version                  # → nexus, version 0.2.0
+nexus journal status             # reads .nexus/state.json from this repo
+python -c "import json; from importlib.metadata import distribution; print(json.loads(distribution('nexus-bootstrap').read_text('direct_url.json')))"
+# → {'dir_info': {'editable': True}, 'url': 'file:///D:/PyProjects/Nexus'}
+
+# 4. First-time secrets + Docker bring-up.
+cp .env.example .env             # then fill in TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, etc.
+python scripts/ensure_workspace_mcp_key.py
+docker compose up -d
+```
+
+**Why sibling, not nested**: Nexus is a separately-versioned dev tool with its own GitHub repo, monthly release cadence, and tests. Co-locating it inside Atlas's tree caused two `.git/` dirs under one root, IDE context bleed, accidental cross-repo commits, and Dockerfile bloat (the production image was at risk of bundling Nexus's tooling). The sibling layout makes the boundary physical: `requirements.txt` (production runtime) does NOT pull Nexus; `requirements-dev.txt` (dev only) does. The Cloud Run / GitHub-Actions Docker build never sees Nexus.
+
+If you accidentally end up with a nested `Nexus/` checkout under PersonalAsst/, run the migration steps in `docs/CHANGELOG.md` (entry dated 2026-04-29) — it's reversible.
+
 ## Service Map
 
 | Service | Container | Health Check | Restart Command |
