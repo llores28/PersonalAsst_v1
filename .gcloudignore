@@ -1,0 +1,72 @@
+# .gcloudignore — exclude from Cloud Build context upload.
+# Same syntax as .gitignore. The build context is the entire repo by default;
+# trimming it makes uploads faster and prevents secrets/artifacts from leaking
+# into the build cache.
+
+# Local Python venv + caches (would balloon the upload)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets — NEVER ship to Cloud Build
+.env
+.env.*
+!.env.example
+
+# Cloud Build doesn't need git history (just the working tree)
+.git/
+
+# IDE + per-user state
+.vscode/
+.idea/
+.cursor/
+.windsurf/
+.codeiumignore
+.cursorrules
+
+# Per-user Claude Code config (project-shared settings.json IS shipped)
+.claude/settings.local.json
+.claude/agents/
+
+# Test artifacts + dev-only deps
+tests/
+pytest.ini
+requirements-dev.txt
+
+# Docs / changelog / runbook — bloat the build context, not used at runtime
+docs/
+*.md
+!README.md  # README ships so the image is self-describing
+
+# Nexus runtime state (gitignored locally; defensive)
+.nexus/
+
+# Nexus archive backups (defensive — should be deletable manually post-refactor)
+Nexus.archive-*/
+
+# Local data volumes (gitignored locally; defensive)
+postgres_data/
+qdrant_data/
+redis_data/
+workspace_tokens/
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+
+# React UI source — built+deployed separately (Firebase Hosting or its own Cloud Run)
+src/orchestration-ui/
+node_modules/
+
+# PyPI extract packages — tracked in repo for development; not part of the
+# bot/api runtime container (the canonical implementation is under src/)
+packages/
+
+# OS junk
+.DS_Store
+Thumbs.db

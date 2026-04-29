@@ -1,0 +1,128 @@
+# Cloud Build pipeline — Atlas (PersonalAsst) deploy to Cloud Run
+#
+# Trigger: push to main on github.com/llores28/PersonalAsst_v1.
+# Connect via Cloud Build UI (Triggers → Connect repository → GitHub).
+#
+# Scope: builds + deploys atlas-bot (long-polling Telegram) and atlas-api
+# (FastAPI orchestration). The workspace-mcp sidecar deploys separately
+# (see docs/RUNBOOK.md "Cloud Run deploy" section). The React UI at
+# orchestration-ui/ is not deployed here — it ships as static files via
+# Firebase Hosting or Cloud Run separately.
+#
+# Long-polling constraints (DO NOT change without reading docs/RUNBOOK.md):
+#   --max-instances=1       Telegram getUpdates returns 409 if two consumers poll
+#   --no-cpu-throttling     Without this, the bot stalls between polls
+#   --min-instances=1       Cold-start adds ~30s latency the bot can't absorb
+#
+# Substitution variables (override per-trigger if needed):
+#   _REGION                 Cloud Run region (default us-central1)
+#   _AR_REPO                Artifact Registry repo name (default atlas-images)
+#   _BOT_SERVICE            Cloud Run service name for the bot (default atlas-bot)
+#   _API_SERVICE            Cloud Run service name for the API (default atlas-api)
+#   _DB_INSTANCE            Cloud SQL connection name (Secret Manager handles
+#                           DATABASE_URL, but Cloud Run needs the instance to
+#                           attach via --add-cloudsql-instances)
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: atlas-images
+  _BOT_SERVICE: atlas-bot
+  _API_SERVICE: atlas-api
+  _DB_INSTANCE: ""  # set per-environment, e.g. "myproj:us-central1:atlas-pg"
+
+# Required APIs (enable once per project):
+#   gcloud services enable cloudbuild.googleapis.com run.googleapis.com \
+#       artifactregistry.googleapis.com secretmanager.googleapis.com \
+#       sqladmin.googleapis.com
+#
+# Required IAM (Cloud Build service account: PROJECT_NUM@cloudbuild.gserviceaccount.com):
+#   - roles/run.admin
+#   - roles/iam.serviceAccountUser
+#   - roles/artifactregistry.writer
+#   - roles/secretmanager.secretAccessor (so the deployed services can resolve --set-secrets)
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8  # Playwright + ffmpeg base layer takes time
+
+steps:
+  # ─── 1. Build the production image (multi-stage, target=prod) ─────────
+  - id: build-prod-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --target=prod
+      - --tag=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:$SHORT_SHA
+      - --tag=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:latest
+      - --cache-from=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:latest
+      - .
+
+  # ─── 2. Push to Artifact Registry ─────────────────────────────────────
+  - id: push-image
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-prod-image]
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas
+
+  # ─── 3. Deploy atlas-bot (Telegram long-polling) ──────────────────────
+  # max-instances=1 + no-cpu-throttling + min-instances=1 are non-negotiable.
+  # See docs/RUNBOOK.md "Cloud Run deploy → bot service" for rationale.
+  - id: deploy-bot
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    waitFor: [push-image]
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_BOT_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --command=python
+      - --args=-m,src.main
+      - --min-instances=1
+      - --max-instances=1
+      - --no-cpu-throttling
+      - --cpu=2
+      - --memory=2Gi
+      - --timeout=3600
+      - --set-env-vars=APP_ENV=production,LOG_LEVEL=INFO,WORKSPACE_MCP_URL=https://workspace-mcp-${PROJECT_NUMBER}.${_REGION}.run.app/mcp
+      - --set-secrets=TELEGRAM_BOT_TOKEN=telegram-bot-token:latest,OPENAI_API_KEY=openai-api-key:latest,GOOGLE_OAUTH_CLIENT_ID=google-oauth-client-id:latest,GOOGLE_OAUTH_CLIENT_SECRET=google-oauth-client-secret:latest,WORKSPACE_MCP_SIGNING_KEY=workspace-mcp-signing-key:latest,MEM0_API_KEY=mem0-api-key:latest,DATABASE_URL=database-url:latest,REDIS_URL=redis-url:latest,QDRANT_URL=qdrant-url:latest,QDRANT_API_KEY=qdrant-api-key:latest
+
+  # ─── 4. Deploy atlas-api (FastAPI orchestration, scale-to-zero) ───────
+  # Different cost profile from the bot: scales 0→N on request, can sleep
+  # idle. The dashboard is the main consumer.
+  - id: deploy-api
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    waitFor: [push-image]
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_API_SERVICE}
+      - --image=${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:$SHORT_SHA
+      - --region=${_REGION}
+      - --platform=managed
+      - --no-allow-unauthenticated
+      - --command=uvicorn
+      - --args=src.orchestration.api:app,--host=0.0.0.0,--port=8080
+      - --port=8080
+      - --min-instances=0
+      - --max-instances=5
+      - --cpu=1
+      - --memory=1Gi
+      - --timeout=300
+      - --set-env-vars=APP_ENV=production,LOG_LEVEL=INFO
+      - --set-secrets=OPENAI_API_KEY=openai-api-key:latest,DATABASE_URL=database-url:latest,REDIS_URL=redis-url:latest,QDRANT_URL=qdrant-url:latest,QDRANT_API_KEY=qdrant-api-key:latest,DASHBOARD_API_KEY=dashboard-api-key:latest
+
+# Cloud Build deletes built images locally after the step but the Artifact
+# Registry copy persists. Set a lifecycle policy on the AR repo to keep last 10
+# images per service to control storage cost.
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:$SHORT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/atlas:latest
+
+timeout: 1800s  # 30 min — Playwright base image takes a while on first build
