@@ -1,5 +1,10 @@
 # Core
-openai-agents>=0.1.0
+# Pin openai-agents minor range. The 0.3.x line removed the
+# `function_tool(timeout=...)` kwarg that org_agent.py relied on (fixed
+# 2026-04-30 by switching to the agent-level asyncio.wait_for envelope).
+# An accidental upgrade past this range would re-break tool wiring, so
+# we cap at <0.4 until a deliberate migration.
+openai-agents>=0.3.3,<0.4
 aiogram>=3.15.0
 pydantic>=2.10.0
 pydantic-settings>=2.7.0

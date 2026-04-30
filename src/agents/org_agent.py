@@ -7,7 +7,12 @@ directly to PostgreSQL via the shared async session.
 Design principles (research-backed):
 - Single DB session per tool call (no nested sessions)
 - SDK ``failure_error_function`` for graceful LLM-visible errors
-- SDK ``timeout=`` on every async tool (15 s read, 30 s write)
+- The orchestrator turn itself is wrapped in ``asyncio.wait_for`` against
+  ``settings.agent_timeout_seconds`` (see src/bot/handlers.py:_handle_message
+  and src/scheduler/jobs.py), so per-tool timeouts are belt-and-suspenders.
+  Note: the ``function_tool(timeout=...)`` SDK kwarg was removed in
+  openai-agents 0.3.x — these tool bodies are simple DB CRUD that don't
+  legitimately exceed the ~120 s agent envelope.
 - Eager-load related rows inside the same session instead of re-opening
 - Activity log every mutation so the dashboard stays in sync
 """
@@ -371,7 +376,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="list_organizations",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def list_organizations() -> str:
         """List all organizations you own, with agent and task counts."""
@@ -429,7 +433,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="find_organization",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def find_organization(name_query: str) -> str:
         """Find an organization by name and return the best matching ID(s).
@@ -466,7 +469,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="create_organization",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def create_organization(
         name: str,
@@ -510,7 +512,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="update_organization",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def update_organization(
         org_id: int,
@@ -564,7 +565,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="get_organization_status",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def get_organization_status(org_id: int) -> str:
         """Get detailed status of an organization including its agents and tasks.
@@ -634,7 +634,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="add_org_agent",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def add_org_agent(
         org_id: int,
@@ -698,7 +697,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="add_org_task",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def add_org_task(
         org_id: int,
@@ -764,7 +762,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="assign_org_task",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def assign_org_task(
         org_id: int,
@@ -810,7 +807,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="complete_org_task",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def complete_org_task(org_id: int, task_id: int) -> str:
         """Mark a task as completed in an organization.
@@ -846,7 +842,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="list_org_tasks",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def list_org_tasks(
         org_id: int,
@@ -899,7 +894,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="schedule_org_task",
         failure_error_function=_org_tool_error,
-        timeout=30,
     )
     async def schedule_org_task(
         org_id: int,
@@ -967,7 +961,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="list_org_schedules",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def list_org_schedules(org_id: int) -> str:
         """List all scheduled jobs scoped to an organization.
@@ -1008,7 +1001,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="cancel_org_schedule",
         failure_error_function=_org_tool_error,
-        timeout=15,
     )
     async def cancel_org_schedule(org_id: int, job_id: str) -> str:
         """Cancel a scheduled job that belongs to an organization.
@@ -1042,7 +1034,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="create_org_tool",
         failure_error_function=_org_tool_error,
-        timeout=30,
     )
     async def create_org_tool(
         org_id: int,
@@ -1102,7 +1093,6 @@ def _build_bound_org_tools(user_id: int) -> list:
     @function_tool(
         name_override="setup_org_project",
         failure_error_function=_org_tool_error,
-        timeout=60,
     )
     async def setup_org_project(
         goal: str,
