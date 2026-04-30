@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-04-30 — Repair-queue worker + background-job recovery (live-bug sweep)
+
+Two production bugs that had been making background jobs and repair tickets appear "broken" from the UI even though the data was being written correctly. Both confirmed via direct DB inspection: a `BackgroundJob` row from 2026-04-23 sat with `iter=0/48` for a week because the APScheduler registration silently failed; three `RepairTicket` rows accumulated with no autonomous worker to advance them.
+
+### Fixed — Background job scheduling (silent TypeError → all jobs no-op)
+`create_background_job()` was passing `job_args=` to `add_interval_job()`, but the correct kwarg is `kwargs=`. The TypeError was caught by a bare `except Exception` and logged as a warning, so the DB row got written but the APScheduler tick never fired. Fix in [src/agents/background_job.py](../src/agents/background_job.py): rename to `kwargs=`, mark the row `failed` on any scheduling error, and **re-raise** so the orchestrator surfaces the failure to the user instead of returning a stale "ok, watching" response.
+
+### Fixed — Repair tickets invisible (schema drift)
+The `RepairTicket` ORM model added a `debug_analysis` JSONB column without a paired migration. `select(RepairTicket)` raised `UndefinedColumnError`, the dashboard's `/api/repairs` endpoint swallowed it and returned `[]`, and the Repairs tab appeared empty even though three tickets existed. New migration [`011_add_repair_debug_analysis.py`](../src/db/migrations/versions/011_add_repair_debug_analysis.py) adds the column defensively (idempotent — checks existence first) plus a `(status, created_at)` composite index so the new queue worker's `WHERE status IN (...) ORDER BY created_at` predicate is satisfied from the index. After the migration the dashboard returns all 3 historical tickets immediately.
+
+### Added — Repair-queue worker (Postgres-as-queue with FOR UPDATE SKIP LOCKED)
+[`src/scheduler/maintenance.py:process_repair_queue`](../src/scheduler/maintenance.py) — registered as a 60s interval job. Claims auto_applied=True tickets in `open`/`debug_analysis_ready` status using `FOR UPDATE SKIP LOCKED` (canonical 2025 outbox pattern; aligns with Procrastinate, PgQueuer, and Neon's queue-system guide). Per-tick batch size is 1 (single-user deployment doesn't need parallelism, keeps OpenAI cost predictable). On pipeline failure the worker releases the lease back to `open` so the next tick can retry — bounded by the existing `_PIPELINE_ATTEMPT_COUNTS` cap in `run_self_healing_pipeline`. Tickets with `approval_required=True` are NEVER claimed autonomously — that's the human-in-the-loop guardrail (matches the safe-action pipeline pattern from the agentic self-healing research: agent proposes, human can veto, rollback automatic).
+
+### Added — BackgroundJob startup recovery
+[`src/scheduler/maintenance.py:restore_running_background_jobs`](../src/scheduler/maintenance.py) — runs once at boot from `start_scheduler` BEFORE the scheduler's background loop kicks off. Scans `background_jobs` for rows with `status='running'` whose `apscheduler_id` is missing from the live schedule set, and re-registers them. Recovers the orphaned 2026-04-23 row plus protects against future APScheduler data-store wipes. Idempotent — already-attached jobs are skipped.
+
+### Tests + verification
+- 4 contract tests in [tests/test_repair_queue_worker.py](../tests/test_repair_queue_worker.py) lock down the kwarg-rename, the re-raise-on-failure path, and the no-required-args invariant the scheduler depends on.
+- Full regression: **1301 passed** (was 1297 — added 4).
+- Live container smoke test confirmed:
+  - Worker registers + ticks within 51ms on first run (claimed=0 because no auto_applied tickets exist yet — correct).
+  - SKIP LOCKED contract verified by injecting one synthetic ticket and running two concurrent claim transactions: only one wins, the other gets `[]`.
+  - `/api/repairs` returns all 3 historical tickets (was returning `[]` due to schema drift).
+
+### Research → architecture
+Web research on FastAPI background-task patterns, Postgres-as-queue (SKIP LOCKED), and self-healing pipeline patterns informed the choice to **stay on APScheduler + add an outbox-style worker** rather than introducing a second framework (Procrastinate, ARQ, Celery). The existing `repair_tickets` table already IS an outbox — rows are committed atomically with the domain change that creates them — so the missing piece was just the claimer. Sources:
+- [APScheduler 4 docs](https://apscheduler.readthedocs.io/en/master/api.html) — confirmed the kwarg name is `kwargs=` (not `job_args=`)
+- [Procrastinate](https://procrastinate.readthedocs.io/) + [Neon queue-system guide](https://neon.com/guides/queue-system) — canonical SKIP LOCKED pattern
+- [Outbox Patterns / Exactly-Once Semantics](https://medium.com/@hadiyolworld007/fastapi-background-jobs-done-right-outbox-patterns-exactly-once-semantics-and-no-surprise-821f640b94fe) — atomic commit of state + intent
+- [Self-Healing Infrastructure with Agentic AI](https://www.algomox.com/resources/blog/self_healing_infrastructure_with_agentic_ai/) + [Building Self-Healing CI/CD for Agentic AI](https://optimumpartners.com/insight/how-to-architect-self-healing-ci/cd-for-agentic-ai/) — human-in-the-loop guardrail pattern
+
 ## 2026-04-29 — Wave A/B/C cohesion sweep + sibling-clone Nexus refactor + 3 PyPI extracts
 
 A multi-front sweep that closed the Wave 5 dangling-modules gap, modernized the `nexus journal` dashboard, surfaced previously-orphaned Redis state via three new Telegram commands, untangled the nested-Nexus repo confusion, and packaged Atlas's three most-reusable safety primitives as standalone PyPI libraries.

@@ -78,6 +78,7 @@ async def create_background_job(
     Returns:
         dict with job id and apscheduler_id.
     """
+    from sqlalchemy import select
     from src.db.session import async_session
     from src.db.models import BackgroundJob
 
@@ -100,16 +101,30 @@ async def create_background_job(
         db_job_id = job.id
 
     try:
-        from src.scheduler.engine import get_scheduler, add_interval_job
+        from src.scheduler.engine import add_interval_job
         await add_interval_job(
             func_path="src.agents.background_job:_tick_background_job_sync",
             job_id=job_id_str,
             seconds=check_interval_seconds,
-            job_args={"job_id": db_job_id, "user_telegram_id": user_telegram_id},
+            kwargs={"job_id": db_job_id, "user_telegram_id": user_telegram_id},
         )
         logger.info("BackgroundJob %d scheduled: %s (interval=%ds)", db_job_id, job_id_str, check_interval_seconds)
     except Exception as e:
-        logger.warning("Could not schedule background job %d via APScheduler: %s", db_job_id, e)
+        # Surface the failure: mark the row 'failed' and bubble the error up so
+        # the caller (orchestrator → user) sees it instead of getting a stale
+        # "ok, watching" response while the row sits idle forever (the original
+        # bug — silent TypeError on a wrong kwarg name made every job a no-op).
+        logger.error("BackgroundJob %d scheduling failed: %s", db_job_id, e)
+        async with async_session() as session:
+            row = (await session.execute(
+                select(BackgroundJob).where(BackgroundJob.id == db_job_id)
+            )).scalar_one_or_none()
+            if row is not None:
+                row.status = "failed"
+                row.result = f"Could not register tick with scheduler: {e}"
+                row.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+        raise
 
     return {"id": db_job_id, "apscheduler_id": job_id_str}
 

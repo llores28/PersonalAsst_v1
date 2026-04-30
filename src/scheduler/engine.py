@@ -98,6 +98,34 @@ async def start_scheduler() -> None:
     except Exception as e:
         logger.warning("Could not add OAuth heartbeat job: %s", e)
 
+    # Repair-queue worker: claims auto_applied=True tickets stuck in
+    # `open`/`debug_analysis_ready` and advances them through the self-
+    # healing pipeline. Postgres-as-queue with FOR UPDATE SKIP LOCKED;
+    # see src/scheduler/maintenance.py:process_repair_queue for the policy.
+    try:
+        await add_interval_job(
+            func_path="src.scheduler.maintenance:process_repair_queue",
+            job_id="_internal_process_repair_queue",
+            seconds=60,
+            kwargs={},
+        )
+        logger.info("Added repair-queue worker (every 60s)")
+    except Exception as e:
+        logger.warning("Could not add repair-queue worker: %s", e)
+
+    # One-shot recovery: re-register APScheduler ticks for any BackgroundJob
+    # row in `running` whose schedule is missing (orphaned by the 2026-04-23
+    # `job_args` TypeError bug, or by a wiped APScheduler data store). Runs
+    # synchronously here so recovery completes BEFORE the background loop
+    # starts ticking — anything restored is included in the first sweep.
+    try:
+        from src.scheduler.maintenance import restore_running_background_jobs
+        report = await restore_running_background_jobs()
+        if report.get("restored") or report.get("errors"):
+            logger.info("BackgroundJob startup recovery: %s", report)
+    except Exception as e:
+        logger.warning("BackgroundJob startup recovery failed (non-fatal): %s", e)
+
     # Ensure the scheduler actually runs jobs
     try:
         await scheduler.start_in_background()

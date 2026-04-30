@@ -335,3 +335,249 @@ async def _scan_connected_google_users() -> list[int]:
         except ValueError:
             continue
     return user_ids
+
+
+# ── Repair-queue worker ───────────────────────────────────────────────────
+# Postgres-as-queue with FOR UPDATE SKIP LOCKED is the canonical 2025 pattern
+# for ticket processors (see Procrastinate, PgQueuer, Neon's queue-system
+# guide). The repair_tickets table is already an outbox: rows are committed
+# atomically with the domain change that triggered them, so we just need a
+# claimer that picks them up and advances them through the pipeline.
+#
+# Safety policy:
+#   - Only `auto_applied=True` tickets are advanced autonomously. Anything
+#     `approval_required=True` waits for a human click in the dashboard
+#     (matches the human-in-the-loop guardrail from the self-healing-pipeline
+#     research — agent proposes, human can veto, rollback automatic).
+#   - Per-tick we claim AT MOST one ticket (capacity 1). The single-user
+#     deployment doesn't need parallelism and one-at-a-time keeps cost
+#     predictable when the pipeline calls OpenAI mid-stage.
+#   - Hard cap on attempts via the `_PIPELINE_ATTEMPT_COUNTS` guard in
+#     run_self_healing_pipeline — this worker does not need its own retry
+#     limiter.
+
+_REPAIR_QUEUE_BATCH = 1
+_REPAIR_QUEUE_CLAIMABLE_STATUSES = ("open", "debug_analysis_ready")
+
+
+async def process_repair_queue() -> dict[str, Any]:
+    """Pull one auto-applicable repair ticket and advance it through the
+    self-healing pipeline. Registered as an interval job from
+    src/scheduler/engine.py:start_scheduler.
+
+    Uses ``FOR UPDATE SKIP LOCKED`` so multiple workers (or overlapping
+    ticks if a long pipeline run blows past the interval) can't double-
+    claim the same ticket.
+
+    Returns a structured report — never raises (matches the pattern of the
+    other maintenance jobs so APScheduler's error listener stays a real
+    signal).
+    """
+    from sqlalchemy import text
+    from src.db.session import async_session
+    from src.repair.engine import run_self_healing_pipeline
+
+    claimed: list[int] = []
+    advanced: list[dict] = []
+    errors: list[dict] = []
+
+    try:
+        async with async_session() as session:
+            # Atomic claim: SELECT ... FOR UPDATE SKIP LOCKED inside the txn,
+            # then UPDATE status='processing' so a second worker (or a re-
+            # entry from the same worker on a long tick) can't pick it up.
+            #
+            # Filter rules:
+            #   - status in (open, debug_analysis_ready) — early stages where
+            #     the system can drive the pipeline forward.
+            #   - auto_applied=True — opt-in autonomous handling. Anything
+            #     else is human-driven via the dashboard "Approve" button.
+            placeholders = ",".join(f":st{i}" for i in range(len(_REPAIR_QUEUE_CLAIMABLE_STATUSES)))
+            params: dict[str, Any] = {f"st{i}": s for i, s in enumerate(_REPAIR_QUEUE_CLAIMABLE_STATUSES)}
+            params["batch"] = _REPAIR_QUEUE_BATCH
+
+            result = await session.execute(
+                text(
+                    f"""
+                    WITH cte AS (
+                      SELECT id
+                        FROM repair_tickets
+                       WHERE status IN ({placeholders})
+                         AND auto_applied = TRUE
+                       ORDER BY created_at
+                       LIMIT :batch
+                       FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE repair_tickets t
+                       SET status = 'processing',
+                           updated_at = now()
+                      FROM cte
+                     WHERE t.id = cte.id
+                 RETURNING t.id, t.title, t.error_context
+                    """
+                ),
+                params,
+            )
+            rows = result.mappings().all()
+            await session.commit()
+
+            for row in rows:
+                claimed.append(row["id"])
+
+        if not claimed:
+            logger.debug("Repair queue: nothing claimable")
+            return {"claimed": 0, "advanced": 0, "errors": 0}
+
+        # Drive the pipeline outside the claim txn — it's long-running
+        # (multi-agent + sandbox) and we don't want to hold a row lock for
+        # minutes. The 'processing' status acts as the lease.
+        for tid in claimed:
+            try:
+                async with async_session() as session:
+                    detail_row = await session.execute(
+                        text(
+                            "SELECT user_id, title, error_context "
+                            "FROM repair_tickets WHERE id = :id"
+                        ),
+                        {"id": tid},
+                    )
+                    detail = detail_row.mappings().one_or_none()
+                if detail is None:
+                    errors.append({"ticket_id": tid, "error": "row vanished after claim"})
+                    continue
+
+                # The pipeline owns its own ticket creation today, so we
+                # pass the original error context through. Hardening the
+                # pipeline to RESUME an existing ticket is the natural
+                # follow-up; for now this re-trigger pattern is acceptable
+                # because attempt-count guards prevent runaway loops.
+                outcome = await run_self_healing_pipeline(
+                    user_telegram_id=int(detail["user_id"]) if detail["user_id"] else 0,
+                    error_description=detail["title"] or "(no title)",
+                    error_context=detail["error_context"],
+                    source="scheduler",
+                )
+                advanced.append({
+                    "ticket_id": tid,
+                    "stage_reached": outcome.get("stage_reached"),
+                    "decision": outcome.get("decision"),
+                })
+            except Exception as exc:
+                logger.exception("Repair queue: ticket %s pipeline raised", tid)
+                errors.append({"ticket_id": tid, "error": str(exc)[:300]})
+                # Release the lease — flip back to 'open' so a future tick
+                # can retry (subject to the pipeline's attempt-count cap).
+                try:
+                    async with async_session() as session:
+                        await session.execute(
+                            text(
+                                "UPDATE repair_tickets SET status = 'open', updated_at = now() "
+                                "WHERE id = :id AND status = 'processing'"
+                            ),
+                            {"id": tid},
+                        )
+                        await session.commit()
+                except Exception:
+                    logger.exception("Repair queue: could not release lease on ticket %s", tid)
+
+    except Exception as exc:
+        logger.exception("Repair queue: claim phase failed")
+        return {"claimed": len(claimed), "advanced": len(advanced), "errors": 1, "fatal": str(exc)[:300]}
+
+    summary = {
+        "claimed": len(claimed),
+        "advanced": len(advanced),
+        "errors": len(errors),
+        "advanced_tickets": advanced,
+        "error_details": errors,
+    }
+    if claimed:
+        logger.info("Repair queue tick: claimed=%d advanced=%d errors=%d",
+                    len(claimed), len(advanced), len(errors))
+    return summary
+
+
+# ── Background-job startup recovery ───────────────────────────────────────
+# APScheduler's PostgreSQL data store persists schedules across restarts —
+# but only schedules that were successfully ADDED. The 2026-04-23 bug
+# (TypeError on `job_args=`) meant rows landed in `background_jobs` with
+# `status='running'` while their APScheduler schedule never existed. After
+# the fix lands, those rows still need to be re-registered or the user's
+# pre-existing background jobs stay orphaned.
+#
+# This is also a defensive guard: if APScheduler's data store is ever wiped
+# (e.g., a bad migration or a manual DELETE), running BackgroundJob rows
+# get re-attached to the scheduler instead of silently dying.
+
+async def restore_running_background_jobs() -> dict[str, Any]:
+    """Re-register APScheduler schedules for any BackgroundJob row in
+    `running` status that doesn't have a live schedule. Idempotent —
+    skips jobs that are already attached.
+
+    Called once from start_scheduler before the background loop kicks off
+    so the recovery runs to completion before normal ticking begins.
+    """
+    from sqlalchemy import select
+    from src.db.session import async_session
+    from src.db.models import BackgroundJob
+    from src.scheduler.engine import get_scheduler, add_interval_job
+
+    restored: list[int] = []
+    skipped: list[int] = []
+    errors: list[dict] = []
+
+    try:
+        scheduler = await get_scheduler()
+        existing = {s.id for s in await scheduler.get_schedules()}
+
+        async with async_session() as session:
+            rows = (await session.execute(
+                select(BackgroundJob).where(BackgroundJob.status == "running")
+            )).scalars().all()
+
+            # Find user_id → telegram_id once, in batch
+            from src.db.models import User
+            user_ids = {r.user_id for r in rows if r.user_id is not None}
+            tg_lookup: dict[int, int] = {}
+            if user_ids:
+                from sqlalchemy import select as _sel
+                u_rows = (await session.execute(
+                    _sel(User.id, User.telegram_id).where(User.id.in_(user_ids))
+                )).all()
+                tg_lookup = {uid: tid for uid, tid in u_rows}
+
+        for row in rows:
+            if row.apscheduler_id and row.apscheduler_id in existing:
+                skipped.append(row.id)
+                continue
+            tg_id = tg_lookup.get(row.user_id) if row.user_id else None
+            if not tg_id:
+                errors.append({"job_id": row.id, "error": "no telegram_id mapping"})
+                continue
+            try:
+                await add_interval_job(
+                    func_path="src.agents.background_job:_tick_background_job_sync",
+                    job_id=row.apscheduler_id or f"bg_job_{tg_id}_{row.id}",
+                    seconds=row.check_interval_seconds,
+                    kwargs={"job_id": row.id, "user_telegram_id": tg_id},
+                )
+                restored.append(row.id)
+            except Exception as exc:
+                logger.warning("Could not restore BackgroundJob %d: %s", row.id, exc)
+                errors.append({"job_id": row.id, "error": str(exc)[:200]})
+
+    except Exception as exc:
+        logger.exception("BackgroundJob recovery: fatal during scan")
+        return {"restored": 0, "skipped": 0, "errors": 1, "fatal": str(exc)[:300]}
+
+    if restored or errors:
+        logger.info("BackgroundJob recovery: restored=%d skipped=%d errors=%d",
+                    len(restored), len(skipped), len(errors))
+    return {
+        "restored": len(restored),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "restored_jobs": restored,
+        "error_details": errors,
+    }
+    return user_ids
