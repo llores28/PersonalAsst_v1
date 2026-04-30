@@ -1522,6 +1522,62 @@ async def cb_repair_skip(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(F.data.startswith("browse_approve:"))
+async def cb_browser_approve(callback: CallbackQuery) -> None:
+    """Inline button: owner taps '✅ Approve' on a browser-action gate."""
+    if not await is_allowed(callback.from_user.id):
+        await callback.answer("Not authorized.", show_alert=True)
+        return
+    if callback.from_user.id != settings.owner_telegram_id:
+        await callback.answer("Only the owner can approve browser actions.", show_alert=True)
+        return
+    try:
+        request_id = callback.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await callback.answer("Invalid request ID.", show_alert=True)
+        return
+    from src.security.browser_action_gate import record_browser_decision
+    await record_browser_decision(callback.from_user.id, request_id, "approve")
+    await callback.answer("Approved.", show_alert=False)
+    try:
+        original = callback.message.text or ""
+        await callback.message.edit_text(
+            f"✅ Approved\n\n{original}",
+            parse_mode="Markdown",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("browse_reject:"))
+async def cb_browser_reject(callback: CallbackQuery) -> None:
+    """Inline button: owner taps '❌ Reject' on a browser-action gate."""
+    if not await is_allowed(callback.from_user.id):
+        await callback.answer("Not authorized.", show_alert=True)
+        return
+    if callback.from_user.id != settings.owner_telegram_id:
+        await callback.answer("Only the owner can reject browser actions.", show_alert=True)
+        return
+    try:
+        request_id = callback.data.split(":", 1)[1]
+    except (IndexError, ValueError):
+        await callback.answer("Invalid request ID.", show_alert=True)
+        return
+    from src.security.browser_action_gate import record_browser_decision
+    await record_browser_decision(callback.from_user.id, request_id, "reject")
+    await callback.answer("Rejected.", show_alert=False)
+    try:
+        original = callback.message.text or ""
+        await callback.message.edit_text(
+            f"❌ Rejected\n\n{original}",
+            parse_mode="Markdown",
+            reply_markup=None,
+        )
+    except Exception:
+        pass
+
+
 @router.message(Command("cancel"))
 async def cmd_cancel(message: Message) -> None:
     """Handle /cancel — cancel current operation or a scheduled task by ID."""

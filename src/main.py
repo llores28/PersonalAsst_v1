@@ -152,6 +152,28 @@ def _check_workspace_mcp_persistence() -> None:
         )
 
 
+def _check_browser_use_profile() -> None:
+    """Warn at startup if BROWSER_USE_ENABLED=true but the persistent
+    profile directory is missing or browser-use itself isn't importable.
+
+    Without this nudge, the orchestrator silently won't register the
+    browser skill and the user wonders why "go to URL X" isn't working.
+    """
+    if not settings.browser_use_enabled:
+        return
+    try:
+        from src.skills.browser import is_browser_skill_available
+        available, reason = is_browser_skill_available()
+        if not available:
+            logger.warning(
+                "BROWSER_USE_ENABLED=true but the browser skill cannot register: %s. "
+                "Until this is fixed, the orchestrator will fall back to non-browser tools.",
+                reason,
+            )
+    except Exception as exc:
+        logger.warning("Could not validate browser-use availability at startup: %s", exc)
+
+
 async def main() -> None:
     """Main entry point."""
     try:
@@ -159,6 +181,7 @@ async def main() -> None:
 
         # Surface workspace-mcp persistence misconfig before any heartbeat fires.
         _check_workspace_mcp_persistence()
+        _check_browser_use_profile()
 
         # Run DB migrations
         await run_migrations()

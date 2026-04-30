@@ -51,6 +51,13 @@ services:
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
       - DB_PASSWORD=${DB_PASSWORD}
+      # ── browser-use skill (autonomous web browsing) ──
+      # Off by default; enable in .env after seeding the profile via
+      # scripts/seed_browser_profile.py. Writes always require Telegram approval
+      # — see src/security/browser_action_gate.py.
+      - BROWSER_USE_ENABLED=${BROWSER_USE_ENABLED:-false}
+      - BROWSER_USE_HEADLESS=${BROWSER_USE_HEADLESS:-true}
+      - BROWSER_USE_PROFILE_DIR=/data/browser_profile
     healthcheck:
       test: ["CMD", "python", "-c", "import os,time; s=os.stat('/tmp/assistant-healthy'); exit(0 if time.time()-s.st_mtime<90 else 1)"]
       interval: 30s
@@ -69,10 +76,16 @@ services:
       - ./src/user_skills:/app/src/user_skills
       - config_data:/app/config
       - backups_data:/app/backups
+      # Persistent Chromium user-data dir for the browser-use skill.
+      # Seeded once via scripts/seed_browser_profile.py so the user can log
+      # into the sites they want Atlas to access; Atlas never sees passwords.
+      - browser_profile:/data/browser_profile
     deploy:
       resources:
         limits:
-          memory: 2G
+          # Bumped 2G → 3G for headless Chromium (browser-use). Real-world
+          # peak per task is ~600-900MB Chromium + ~300-500MB Python.
+          memory: 3G
           cpus: "2.0"
 
   # ─── PostgreSQL (Memory, Jobs, Audit) ───
@@ -205,3 +218,7 @@ volumes:
   config_data:
   workspace_tokens:
   backups_data:
+  # Chromium user-data dir for the browser-use skill. Survives container
+  # rebuilds so the user only has to seed logins once per site (until
+  # the site itself expires the session).
+  browser_profile:

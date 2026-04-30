@@ -136,6 +136,40 @@ class Settings(BaseSettings):
     # ── Web Search (optional) ──
     tavily_api_key: str = Field(default="")
 
+    # ── Browser-use (autonomous web browsing skill) ──────────────────────
+    # When enabled, registers the `browser` skill in the orchestrator. The
+    # skill drives a real Chromium instance (via the Playwright already
+    # installed in the assistant container) using the browser-use library
+    # plus an LLM. Authentication relies on a persistent Chromium
+    # user_data_dir at `browser_use_profile_dir`; the user seeds it once
+    # via scripts/seed_browser_profile.py. Writes (form submit, button
+    # click with side-effects) ALWAYS go through the OrgApprovalGate /
+    # Telegram approval — see src/security/browser_action_gate.py.
+    browser_use_enabled: bool = Field(
+        default=False,
+        description="Register the browser-use skill on the orchestrator.",
+    )
+    browser_use_profile_dir: str = Field(
+        default="/data/browser_profile",
+        description="Persistent Chromium user-data dir (seeded via scripts/seed_browser_profile.py).",
+    )
+    browser_use_headless: bool = Field(
+        default=True,
+        description="Headless mode. Set False on the host for the seed script so the user can log in.",
+    )
+    browser_use_max_steps: int = Field(
+        default=25,
+        description="Hard cap on browser-use Agent steps per task — bounds runaway loops.",
+    )
+    browser_use_step_timeout_seconds: int = Field(
+        default=120,
+        description="Per-step timeout passed through to browser-use Agent.",
+    )
+    browser_use_total_timeout_seconds: int = Field(
+        default=300,
+        description="Wall-clock cap on a single browse_web invocation (asyncio.wait_for).",
+    )
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 

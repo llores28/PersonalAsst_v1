@@ -202,6 +202,58 @@ gcloud run services describe atlas-api --region=us-central1 --format='value(stat
 2. **Letting `--max-instances` default to 100** → during redeploy, old+new instance both call getUpdates → Telegram returns 409 Conflict → bot bans polling for ~10 min. Already pinned to `--max-instances=1` in cloudbuild.yaml.
 3. **Using Memorystore + VPC connector for single-user** → +$25/mo for zero functional benefit. Use Upstash unless your traffic justifies VPC-private Redis.
 
+## Enabling the browser-use skill
+
+Atlas can drive a real Chromium browser via the `browse_web` tool (registered as the `browser` skill) once you've seeded a persistent profile. Writes always require Telegram approval — see [`src/security/browser_action_gate.py`](../src/security/browser_action_gate.py).
+
+### One-time seed
+
+The container ships with `BROWSER_USE_ENABLED=false`. Turning it on:
+
+1. Add to your `.env`:
+   ```
+   BROWSER_USE_ENABLED=true
+   BROWSER_USE_HEADLESS=true
+   ```
+2. Rebuild + restart the assistant so it picks up `browser-use` from `requirements.txt`:
+   ```bash
+   docker compose build assistant
+   docker compose up -d assistant
+   ```
+3. Seed the persistent profile (HEADED mode, override the headless flag):
+   ```bash
+   docker compose run --rm \
+     -e BROWSER_USE_HEADLESS=false \
+     assistant python -m scripts.seed_browser_profile
+   ```
+   A Chromium window opens. Log into the sites you want Atlas to access (LinkedIn, banks, anything that lives behind a wall). Click "remember me" / "stay signed in" so the cookies persist. When you're done, close the browser OR press Enter in the terminal.
+
+   Cookies land in the named volume `browser_profile` and survive container rebuilds.
+
+4. Restart the assistant once more so the orchestrator registers the skill on next user request:
+   ```bash
+   docker compose restart assistant
+   ```
+
+### When to re-seed
+
+Re-run step 3 whenever a site itself expires the session — typical cadences:
+- LinkedIn: ~30 days
+- Banks: days–weeks
+- Most SaaS dashboards: 30–90 days
+
+Atlas will surface a Telegram message of the form *"Browser action `go_to_url` failed: login required"* when this happens.
+
+### Safety guardrails (read before enabling)
+
+- **Telegram approval gate**: Every form submit, "Apply" / "Submit" / "Checkout" / "Send" click pauses the agent and posts a Telegram prompt with ✅/❌ buttons. The agent only proceeds on ✅. Default timeout is 5 min, configurable via `BROWSER_USE_TOTAL_TIMEOUT_SECONDS`. Read actions (navigate, scroll, scrape, screenshot) run autonomously without the gate.
+- **Concurrency limit 1**: Only one `browse_web` invocation runs at a time (Semaphore in `src/integrations/browser_use_runner.py`). Bumping this requires also bumping `assistant.deploy.resources.limits.memory` past 3G.
+- **No auto-apply path**: The orchestrator can route the user's natural-language request to the browser, but it will never auto-submit applications/forms — the gate intercepts every write. Same human-in-the-loop posture LinkedIn TOS requires (see [TOS guide](https://connectsafely.ai/articles/is-linkedin-automation-safe-tos-scraping-guide-2026), [Artisan AI ban precedent](https://techcrunch.com/2026/01/07/yes-linkedin-banned-ai-agent-startup-artisan-but-now-its-back/)).
+
+### Disabling
+
+Set `BROWSER_USE_ENABLED=false` and restart. The skill un-registers; the volume is preserved (cookies stay) so re-enabling is instant.
+
 ## Common Operations
 
 ### Start Everything

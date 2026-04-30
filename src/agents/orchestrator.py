@@ -2073,6 +2073,21 @@ async def create_orchestrator_async(
         if settings.openrouter_image_enabled:
             skill_registry.register(build_openrouter_skill(user_id))
 
+        # Browser-use skill (autonomous web browsing). Registered only when
+        # the feature flag is on AND the seed profile exists AND browser-use
+        # is importable. Writes always require Telegram approval — see
+        # src/security/browser_action_gate.py.
+        try:
+            from src.skills.browser import build_browser_skill, is_browser_skill_available
+            available, reason = is_browser_skill_available()
+            if available:
+                skill_registry.register(build_browser_skill(user_id))
+                logger.info("Registered browser-use skill (autonomous browsing)")
+            else:
+                logger.debug("browser-use skill not registered: %s", reason)
+        except Exception as exc:
+            logger.warning("Could not evaluate browser-use skill availability: %s", exc)
+
         # Dynamic CLI/function skills from src/tools/plugins/ directory
         for dyn_skill in await load_dynamic_skills():
             skill_registry.register(dyn_skill)
