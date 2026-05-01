@@ -250,3 +250,245 @@ def test_write_actions_set_includes_canonical_browser_use_verbs():
     }
     missing = must_have - WRITE_ACTION_VERBS
     assert not missing, f"WRITE_ACTION_VERBS dropped canonical write verbs: {missing}"
+
+
+# ─── Tier 2: failure classifier + retry strategy ─────────────────────────
+
+
+def test_classify_failure_login_expired_takes_priority():
+    """A timeout that lands on a login screen must classify as
+    LOGIN_EXPIRED (re-seed needed), not TIMEOUT (retry with longer
+    window). The order matters because retrying a login-expired session
+    just wastes tokens."""
+    from src.integrations.browser_use_failures import classify_failure, FailureKind
+
+    class _FakeHistory:
+        # Simulate browser-use's AgentHistoryList interface
+        def urls(self):
+            return ["https://app.example.com/login?redirect=/dashboard"]
+        def model_thoughts(self):
+            return ["Page redirected to login. Session expired."]
+
+    kind = classify_failure(TimeoutError("step exceeded step_timeout"), _FakeHistory())
+    assert kind == FailureKind.LOGIN_EXPIRED, (
+        f"Login + timeout combo must classify as LOGIN_EXPIRED, got {kind}"
+    )
+
+
+def test_classify_failure_element_drift_routes_to_vision_retry():
+    """DOM-drift failures (selector miss) must classify as ELEMENT_DRIFT
+    so the runner retries once with use_vision=True."""
+    from src.integrations.browser_use_failures import classify_failure, FailureKind
+
+    kind = classify_failure(
+        Exception("element not found: #submit-btn"),
+        history=None,
+    )
+    assert kind == FailureKind.ELEMENT_DRIFT
+
+
+def test_classify_failure_pure_timeout_routes_to_extended_retry():
+    """Pure timeout (no login redirect) must classify as TIMEOUT so the
+    runner retries once with 2x step_timeout."""
+    from src.integrations.browser_use_failures import classify_failure, FailureKind
+
+    class _FakeHistory:
+        def urls(self):
+            return ["https://example.com/api/data"]
+        def model_thoughts(self):
+            return ["Waiting for response..."]
+
+    kind = classify_failure(TimeoutError("step exceeded step_timeout"), _FakeHistory())
+    assert kind == FailureKind.TIMEOUT
+
+
+def test_classify_failure_unknown_when_no_sentinels_match():
+    """Anything we can't bucket must NOT silently retry — UNKNOWN means
+    'open a ticket and stop trying'."""
+    from src.integrations.browser_use_failures import classify_failure, FailureKind
+
+    kind = classify_failure(ValueError("some unrelated bug"), history=None)
+    assert kind == FailureKind.UNKNOWN
+
+
+# ─── Tier 1: bridge module signatures ────────────────────────────────────
+
+
+def test_collect_sensitive_data_signature_returns_dict():
+    """The runner depends on this returning a plain dict[str, str].
+    If it ever returns something fancier, browser-use's sensitive_data
+    parameter rejects it silently."""
+    from src.integrations.browser_use_bridge import collect_sensitive_data
+
+    sig = inspect.signature(collect_sensitive_data)
+    assert inspect.iscoroutinefunction(collect_sensitive_data)
+    params = list(sig.parameters.keys())
+    assert "user_telegram_id" in params, (
+        f"collect_sensitive_data signature drifted: {params}"
+    )
+
+
+def test_build_atlas_system_extension_returns_non_empty_string():
+    """If this is empty, browser-use ignores it AND we lose the safety
+    posture (describe-before-submit, never invent credentials)."""
+    from src.integrations.browser_use_bridge import build_atlas_system_extension
+
+    text = build_atlas_system_extension()
+    assert isinstance(text, str)
+    assert len(text) > 100, "system extension is too thin to be meaningful"
+    # Locks the safety lines (the WHY of always-on gate)
+    assert "describe" in text.lower()
+    assert "credentials" in text.lower() or "credential" in text.lower()
+
+
+def test_build_step_audit_hook_returns_async_callable():
+    """Browser-use registers this as on_step_end=. If it isn't a
+    coroutine, browser-use either ignores it or raises mid-run."""
+    from src.integrations.browser_use_failures import build_step_audit_hook
+
+    hook = build_step_audit_hook(user_telegram_id=12345, task="x")
+    assert inspect.iscoroutinefunction(hook), (
+        "build_step_audit_hook must return an async callable so "
+        "browser-use can `await` it from on_step_end."
+    )
+
+
+# ─── Tier 2: targeted-retry contract ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_targeted_retry_opens_ticket_on_unknown_failure(monkeypatch):
+    """When _run_with_targeted_retry exhausts attempts on UNKNOWN failure,
+    it must call open_repair_ticket_for_browser_failure AND raise
+    BrowserRunFailed. Without this contract, browser failures would be
+    invisible to the dashboard's Repairs tab."""
+    from src.integrations import browser_use_runner
+    from src.integrations.browser_use_runner import (
+        BrowserRunFailed,
+        _run_with_targeted_retry,
+    )
+
+    # Stub the inner agent to always raise an unclassifiable exception
+    raised: list[BaseException] = []
+
+    async def _stub_run_agent(self, **kwargs):
+        exc = ValueError("totally unrelated failure")
+        raised.append(exc)
+        raise exc
+
+    monkeypatch.setattr(browser_use_runner.BrowserRunner, "_run_agent", _stub_run_agent)
+
+    # Capture the ticket-creation call
+    ticket_calls: list[dict] = []
+
+    async def _stub_open_ticket(**kw):
+        ticket_calls.append(kw)
+        return 999
+
+    monkeypatch.setattr(
+        "src.integrations.browser_use_failures.open_repair_ticket_for_browser_failure",
+        _stub_open_ticket,
+    )
+
+    runner = browser_use_runner.BrowserRunner()
+    with pytest.raises(BrowserRunFailed) as excinfo:
+        await _run_with_targeted_retry(
+            runner=runner,
+            Agent=MagicMock,
+            task="some task",
+            user_telegram_id=42,
+            max_steps=5,
+            use_vision=False,
+            output_schema=None,
+            action_hook=lambda *a, **kw: True,
+        )
+
+    # Ticket was opened
+    assert len(ticket_calls) == 1
+    assert ticket_calls[0]["user_telegram_id"] == 42
+    assert ticket_calls[0]["task"] == "some task"
+
+    # Error message includes the ticket id + failure kind
+    msg = str(excinfo.value)
+    assert "RepairTicket #999" in msg
+    assert "unknown" in msg.lower()
+
+
+@pytest.mark.asyncio
+async def test_targeted_retry_retries_once_on_element_drift_with_vision_on(monkeypatch):
+    """ELEMENT_DRIFT failures must retry exactly once with use_vision=True.
+    The original visit ran without vision (cost optimization); the retry
+    flips it on so the model can recover via visual grounding."""
+    from src.integrations import browser_use_runner
+    from src.integrations.browser_use_runner import _run_with_targeted_retry
+
+    attempts: list[dict] = []
+
+    async def _stub_run_agent(self, **kwargs):
+        attempts.append({"use_vision": kwargs["use_vision"], "step_timeout": kwargs.get("step_timeout_override")})
+        if len(attempts) == 1:
+            raise Exception("element not found: button#apply")
+        return ("OK after vision retry", MagicMock())
+
+    monkeypatch.setattr(browser_use_runner.BrowserRunner, "_run_agent", _stub_run_agent)
+
+    runner = browser_use_runner.BrowserRunner()
+    result = await _run_with_targeted_retry(
+        runner=runner,
+        Agent=MagicMock,
+        task="click apply",
+        user_telegram_id=42,
+        max_steps=5,
+        use_vision=False,
+        output_schema=None,
+        action_hook=lambda *a, **kw: True,
+    )
+    assert result == "OK after vision retry"
+    assert len(attempts) == 2
+    # First attempt: vision off (initial config). Second: vision flipped on
+    assert attempts[0]["use_vision"] is False
+    assert attempts[1]["use_vision"] is True
+
+
+@pytest.mark.asyncio
+async def test_targeted_retry_does_not_retry_on_login_expired(monkeypatch):
+    """LOGIN_EXPIRED needs a human to re-seed the profile. Retrying just
+    burns LLM cost on the same login screen. Verify the runner makes
+    EXACTLY one attempt, opens a ticket, and surfaces the re-seed hint
+    in the error message."""
+    from src.integrations import browser_use_runner
+    from src.integrations.browser_use_runner import (
+        BrowserRunFailed,
+        _run_with_targeted_retry,
+    )
+
+    attempts = 0
+
+    async def _stub_run_agent(self, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise Exception("Page redirected to /login — your session has expired")
+
+    monkeypatch.setattr(browser_use_runner.BrowserRunner, "_run_agent", _stub_run_agent)
+    monkeypatch.setattr(
+        "src.integrations.browser_use_failures.open_repair_ticket_for_browser_failure",
+        AsyncMock(return_value=42),
+    )
+
+    runner = browser_use_runner.BrowserRunner()
+    with pytest.raises(BrowserRunFailed) as excinfo:
+        await _run_with_targeted_retry(
+            runner=runner,
+            Agent=MagicMock,
+            task="check messages",
+            user_telegram_id=99,
+            max_steps=5,
+            use_vision=False,
+            output_schema=None,
+            action_hook=lambda *a, **kw: True,
+        )
+
+    assert attempts == 1, f"LOGIN_EXPIRED must NOT retry; got {attempts} attempts"
+    assert "seed_browser_profile" in str(excinfo.value), (
+        "Re-seed hint must be in the error message so the user knows what to do"
+    )

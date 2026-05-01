@@ -68,6 +68,7 @@ def _build_browser_use_tools(bound_user_id: int) -> list:
             BrowserRunner,
             BrowserUseUnavailable,
             BrowserRunTimeout,
+            BrowserRunFailed,
         )
         from src.security.browser_action_gate import ApprovalDenied, ApprovalTimeout
 
@@ -93,6 +94,12 @@ def _build_browser_use_tools(bound_user_id: int) -> list:
             return f"Browser action cancelled by user: {exc}"
         except ApprovalTimeout as exc:
             return f"Browser action cancelled — no approval received: {exc}"
+        except BrowserRunFailed as exc:
+            # Targeted-retry path already exhausted + RepairTicket opened.
+            # Surface a useful message; the dashboard's Repairs tab will
+            # show the ticket with full action_history captured.
+            logger.warning("browse_web failed after retries: %s", exc)
+            return f"Browser run failed and a repair ticket was opened: {exc}"
         except Exception as exc:
             logger.exception("browse_web unexpected failure")
             return f"The browser run failed: {exc}"
