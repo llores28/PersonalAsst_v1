@@ -178,10 +178,11 @@ async def test_runner_raises_unavailable_when_browser_use_missing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_runner_passes_settings_into_browser_use_agent_kwargs(monkeypatch):
-    """The runner must thread `user_data_dir`, `headless`, `max_steps`,
-    `step_timeout`, and the action-hook through to the Agent constructor.
-    If a refactor drops any of these, the persistent profile breaks or
-    the gate stops firing."""
+    """The runner must wire `user_data_dir`, `headless`, `step_timeout`,
+    the per-step gate hook, and the persistent BrowserProfile into the
+    Agent. `max_steps` + `on_step_end` flow into `agent.run(...)`, not
+    the constructor (browser-use 0.7 API). If a refactor drops any of
+    these, the persistent profile breaks or the gate stops firing."""
     from src.integrations import browser_use_runner
     from src.settings import settings
 
@@ -192,20 +193,26 @@ async def test_runner_passes_settings_into_browser_use_agent_kwargs(monkeypatch)
     monkeypatch.setattr(settings, "browser_use_step_timeout_seconds", 99)
 
     captured_kwargs: dict = {}
+    captured_run_kwargs: dict = {}
+
+    class _StubBrowserProfile:
+        def __init__(self, **kw):
+            self._kw = kw
 
     class _StubAgent:
         def __init__(self, **kwargs):
             captured_kwargs.update(kwargs)
 
-        async def run(self):
+        async def run(self, **run_kwargs):
+            captured_run_kwargs.update(run_kwargs)
             class _Hist:
                 def final_result(self):
                     return "ok"
             return _Hist()
 
-    # Inject the stub by patching the lazy import inside _run_agent.
     fake_browser_use_module = MagicMock()
     fake_browser_use_module.Agent = _StubAgent
+    fake_browser_use_module.BrowserProfile = _StubBrowserProfile
     monkeypatch.setitem(sys.modules, "browser_use", fake_browser_use_module)
 
     runner = browser_use_runner.BrowserRunner()
@@ -213,14 +220,17 @@ async def test_runner_passes_settings_into_browser_use_agent_kwargs(monkeypatch)
 
     assert result == "ok"
     assert captured_kwargs["task"] == "test task"
-    assert captured_kwargs["max_steps"] == 7
-    config = captured_kwargs["browser_config"]
-    assert config["user_data_dir"] == "/tmp/test-profile"
-    assert config["headless"] is True
-    assert config["step_timeout"] == 99
-    # Both names provided so multiple browser-use 0.7.x revisions work
-    assert callable(captured_kwargs["pre_action_callback"])
-    assert callable(captured_kwargs["on_action"])
+    assert captured_kwargs["step_timeout"] == 99
+    # Profile is wrapped via BrowserProfile, not a raw dict
+    profile = captured_kwargs["browser_profile"]
+    assert isinstance(profile, _StubBrowserProfile)
+    assert profile._kw["user_data_dir"] == "/tmp/test-profile"
+    assert profile._kw["headless"] is True
+    # The per-step gate hook is registered under the canonical name
+    assert callable(captured_kwargs["register_new_step_callback"])
+    # max_steps + on_step_end flow into .run(), not the constructor
+    assert captured_run_kwargs["max_steps"] == 7
+    assert callable(captured_run_kwargs["on_step_end"])
 
 
 # ─── Public-API signatures (locking the contract) ────────────────────────
@@ -448,6 +458,52 @@ async def test_targeted_retry_retries_once_on_element_drift_with_vision_on(monke
     # First attempt: vision off (initial config). Second: vision flipped on
     assert attempts[0]["use_vision"] is False
     assert attempts[1]["use_vision"] is True
+
+
+def test_extract_allowed_domains_pulls_hostnames_from_task():
+    """browser-use 0.7 warns about prompt-injection risk when
+    sensitive_data is provided without allowed_domains. We mine
+    hostnames from the task itself so writes can't fan out to arbitrary
+    domains. Empty list means 'no URLs in task' (caller skips the
+    kwarg)."""
+    from src.integrations.browser_use_runner import _extract_allowed_domains
+
+    assert _extract_allowed_domains("Go to https://news.ycombinator.com and read") == ["news.ycombinator.com"]
+    # Two URLs, lower-cased, deduped, sorted
+    multi = _extract_allowed_domains(
+        "Open https://Example.com/x then visit http://api.example.com/y "
+        "and finally https://example.com/z"
+    )
+    assert multi == ["api.example.com", "example.com"]
+    # No URLs in the task
+    assert _extract_allowed_domains("just describe the weather") == []
+
+
+def test_find_chromium_binary_returns_a_path_or_none(monkeypatch):
+    """The runner uses this to point browser-use at the Playwright-
+    installed chromium so it doesn't try to spawn `uvx` (which isn't
+    in the slim image). Two contracts to lock:
+    (a) when the bundled directory exists, return a real path
+    (b) when nothing matches, return None — never raise."""
+    import os
+    import tempfile
+    from src.integrations.browser_use_runner import _find_chromium_binary
+
+    # (a) Stub out the env var to point at a fake bundle layout
+    with tempfile.TemporaryDirectory() as tmp:
+        bundle = os.path.join(tmp, "chromium-9999", "chrome-linux64")
+        os.makedirs(bundle)
+        binary = os.path.join(bundle, "chrome")
+        open(binary, "w").close()
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", tmp)
+        assert _find_chromium_binary() == binary
+
+    # (b) No env var, no /opt/playwright on most CI hosts → None
+    monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+    # Don't assert exact None — CI hosts may or may not have /opt/playwright.
+    # The contract is just "doesn't raise"
+    result = _find_chromium_binary()
+    assert result is None or isinstance(result, str)
 
 
 @pytest.mark.asyncio

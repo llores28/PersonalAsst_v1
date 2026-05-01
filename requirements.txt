@@ -1,10 +1,9 @@
 # Core
-# Pin openai-agents minor range. The 0.3.x line removed the
-# `function_tool(timeout=...)` kwarg that org_agent.py relied on (fixed
-# 2026-04-30 by switching to the agent-level asyncio.wait_for envelope).
-# An accidental upgrade past this range would re-break tool wiring, so
-# we cap at <0.4 until a deliberate migration.
-openai-agents>=0.3.3,<0.4
+# openai-agents pin. Constraints:
+#   - 0.3.x removed `function_tool(timeout=...)`; we already migrated.
+#   - 0.4+ is needed to allow openai 2.x (browser-use 0.12 requires it).
+#   - Cap at <1 in case the SDK ever ships a major-version refactor.
+openai-agents>=0.4.0,<1
 aiogram>=3.15.0
 pydantic>=2.10.0
 pydantic-settings>=2.7.0
@@ -17,7 +16,11 @@ psycopg2-binary>=2.9.11
 alembic>=1.14.0
 
 # Memory
-mem0ai>=0.1.0
+# Floor pinned to 2.x — older mem0ai versions pin langchain-community<0.3
+# which conflicts with browser-use 0.12's transitive constraints; pip
+# backtracks indefinitely through the 0.x line and fails to resolve.
+# 2.x relaxes the langchain pins so the resolver completes cleanly.
+mem0ai>=2.0.0,<3
 
 # Vector store client (for direct Qdrant access if needed)
 qdrant-client>=1.12.0
@@ -40,7 +43,10 @@ playwright>=1.40.0
 # LLM-driven autonomous browsing (uses Playwright Chromium already installed
 # above). Wired as the `browser` skill in src/skills/browser.py — gated behind
 # `browser_use_enabled=True` and an always-on approval check on writes.
-browser-use>=0.7.0,<0.8
+# 0.7.x had a CDP-launch race that hung Chromium startup in headless Docker
+# (chrome bound the debug port but the upstream wait_for_cdp_url never
+# connected). Bumped to 0.12.x where the launch path is rewritten.
+browser-use>=0.12.0,<0.14
 
 # LLM-ready web scraping (uses Playwright under the hood)
 crawl4ai>=0.8.0
